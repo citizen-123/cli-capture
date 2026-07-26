@@ -94,23 +94,6 @@ func (v *VT) Render(width, height int) string {
 	return b.String()
 }
 
-// MouseEnabled reports whether the child has set any of the DEC private mouse
-// modes (X10, button-event, any-motion, or "many" tracking). Takes the same
-// lock Render does since Mode() reads shared terminal state.
-func (v *VT) MouseEnabled() bool {
-	v.term.Lock()
-	defer v.term.Unlock()
-	return v.term.Mode()&vt10x.ModeMouseMask != 0
-}
-
-// MouseSGR reports whether the child asked for SGR (mode 1006) mouse-
-// coordinate encoding on top of whatever tracking mode MouseEnabled found.
-func (v *VT) MouseSGR() bool {
-	v.term.Lock()
-	defer v.term.Unlock()
-	return v.term.Mode()&vt10x.ModeMouseSgr != 0
-}
-
 // sgr builds the escape sequence for a glyph's attributes and colors, resetting
 // first so no attribute leaks from the previous cell.
 func sgr(g vt10x.Glyph) string {
