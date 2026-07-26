@@ -74,14 +74,14 @@ type Model struct {
 	showHelp      bool   // floating help overlay
 	sessionPath   string // where "save session" writes
 	status        string
+	// leader is the tmux-style prefix: press it, then a command key. Only this
+	// one chord is taken from the target — everything else in the terminal pane
+	// passes through untouched — so it is configurable via -leader for operators
+	// whose target app needs the default binding.
+	leader Leader
 }
 
-// leaderKey is the tmux-style prefix: press it, then a command key. Using a
-// leader means only this one key is taken from the target — everything else in
-// the terminal pane passes through untouched.
-const leaderKey = tea.KeyCtrlA
-
-func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, screen terminal.Emulator, feeds Feeds, sessionPath string) Model {
+func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, screen terminal.Emulator, feeds Feeds, sessionPath string, leader Leader) Model {
 	return Model{
 		store:       store,
 		engine:      engine,
@@ -93,7 +93,9 @@ func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, 
 		vp:          viewport.New(0, 0),
 		fi:          newFilter(),
 		sessionPath: sessionPath,
-		status:      "? for help · Ctrl+A w switch pane · Ctrl+A i arm intercept · Ctrl+A q quit",
+		leader:      leader,
+		status: fmt.Sprintf("? for help · %[1]s w switch pane · %[1]s i arm intercept · %[1]s q quit",
+			leader.Name),
 	}
 }
 
@@ -363,7 +365,7 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingLeader {
 		return m.leaderCommand(k)
 	}
-	if k.Type == leaderKey {
+	if k.Type == m.leader.Key {
 		m.pendingLeader = true
 		return m, nil
 	}
@@ -472,13 +474,13 @@ func (m *Model) doInject() string {
 
 // leaderCommand interprets the key pressed after the leader. Pressing the leader
 // twice sends a literal leader byte to the target (tmux behavior), so the child
-// app can still receive Ctrl+A.
+// app can still receive the leader chord itself.
 func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.pendingLeader = false
 
-	if k.Type == leaderKey {
+	if k.Type == m.leader.Key {
 		if m.focus == focusTerminal && m.target != nil {
-			m.target.Pty.Write([]byte{0x01}) // literal Ctrl+A
+			m.target.Pty.Write([]byte{m.leader.Byte})
 		}
 		return m, nil
 	}

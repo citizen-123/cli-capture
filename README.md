@@ -132,6 +132,7 @@ Everything after `--` is the target program to launch and monitor.
 | `-mitm <specs>` | *(all)* | MITM (decrypt) only these TLS hosts. |
 | `-no-mitm <specs>` | — | Pass these TLS hosts through **without** decrypting (blind tunnel, still logged). |
 | `-load <file>` | — | Preload a saved capture session (JSON) into the flow list. |
+| `-leader <key>` | `ctrl+a` | Prefix key for cli-capture's own commands. `ctrl+a` … `ctrl+z`, or `ctrl+space`. Move it if your target app needs the default. |
 | `-transparent <addr>` | off | Also run a transparent-redirect listener at this address (Linux, needs root + nftables/iptables). |
 | `-transparent-uid <uid>` | `-1` | The uid whose traffic the redirect rule targets. |
 | `-transparent-apply` | off | Actually install/remove the redirect rules (needs root); otherwise they're just logged for you to run. |
@@ -168,11 +169,21 @@ Postures fall out of the defaults: give `-scope` and you get an **allowlist**
 
 ## Keybindings
 
-Keys use a **tmux-style leader (`Ctrl+A`)** so the terminal pane keeps all of its
-own keys — only the leader is intercepted (press it twice to send a literal
-`Ctrl+A` to the target). Press **`?`** for the in-app help overlay.
+Keys use a **tmux-style leader (`Ctrl+A` by default)** so the terminal pane keeps
+all of its own keys — only the leader is intercepted (press it twice to send a
+literal leader byte to the target). Press **`?`** for the in-app help overlay.
 
-**Global — `Ctrl+A` then:**
+If your target app wants `Ctrl+A` — readline's beginning-of-line, or tmux itself
+— move the leader instead of fighting it:
+
+```bash
+cli-capture -leader ctrl+space -- claude
+```
+
+Accepts `ctrl+a` … `ctrl+z` and `ctrl+space`. The help overlay and status bar
+follow whatever you pick, and the rebound key is released back to the target.
+
+**Global — leader then:**
 
 | Key | Action |
 |---|---|

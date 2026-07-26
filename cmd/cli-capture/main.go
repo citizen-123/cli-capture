@@ -48,12 +48,21 @@ func main() {
 		transparentApply = flag.Bool("transparent-apply", false, "actually install/remove the nftables redirect (needs root); otherwise the rules are only logged")
 
 		loadPath = flag.String("load", "", "preload a saved capture session (JSON) into the flow list")
+
+		leaderSpec = flag.String("leader", "ctrl+a", "tmux-style prefix key for cli-capture's own commands: ctrl+a … ctrl+z, or ctrl+space")
 	)
 	flag.Parse()
 	argv := flag.Args()
 	if len(argv) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: cli-capture [flags] -- <command> [args...]")
 		os.Exit(2)
+	}
+
+	// Parse the leader before anything is spawned, so a typo fails on stderr
+	// rather than after the TUI has taken the screen.
+	leader, err := tui.ParseLeader(*leaderSpec)
+	if err != nil {
+		fatal("leader: %v", err)
 	}
 
 	authority, err := ca.LoadOrCreate(*confDir)
@@ -172,7 +181,7 @@ func main() {
 	go pumpPTY(target, screen, ptyCh)
 
 	feeds := tui.Feeds{Events: store.Subscribe(), Pty: ptyCh, Pause: pauseCh}
-	model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json"))
+	model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json"), leader)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 
 	// Quit the UI when the child exits.
