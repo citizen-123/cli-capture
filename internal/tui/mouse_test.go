@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
@@ -11,21 +10,22 @@ import (
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 	"github.com/citizen-123/cli-capture/internal/runner"
+	"github.com/citizen-123/cli-capture/internal/terminal"
 )
 
-// fakeEmulator is a minimal terminal.Emulator stand-in so mouse-forwarding
-// tests can control MouseEnabled/MouseSGR without spinning up a real vt10x
-// terminal and feeding it DECSET sequences.
+// fakeEmulator is a minimal terminal.Emulator stand-in that records every
+// ForwardMouse call, so mouse-forwarding tests can check the TUI's own job —
+// hit-testing and coordinate translation — without spinning up a real VT and
+// caring whether the child has enabled mouse tracking (that gate now lives
+// entirely in terminal.VT; see its own tests).
 type fakeEmulator struct {
-	mouseEnabled bool
-	mouseSGR     bool
+	forwarded []terminal.MouseEvent
 }
 
-func (f *fakeEmulator) Write(p []byte) (int, error)     { return len(p), nil }
-func (f *fakeEmulator) Render(width, height int) string { return "" }
-func (f *fakeEmulator) Resize(cols, rows int)           {}
-func (f *fakeEmulator) MouseEnabled() bool              { return f.mouseEnabled }
-func (f *fakeEmulator) MouseSGR() bool                  { return f.mouseSGR }
+func (f *fakeEmulator) Write(p []byte) (int, error)         { return len(p), nil }
+func (f *fakeEmulator) Render(width, height int) string     { return "" }
+func (f *fakeEmulator) Resize(cols, rows int)               {}
+func (f *fakeEmulator) ForwardMouse(ev terminal.MouseEvent) { f.forwarded = append(f.forwarded, ev) }
 
 func newFlows(n int) []*capture.Flow {
 	flows := make([]*capture.Flow, 0, n)
@@ -103,98 +103,65 @@ func TestFlowRowIndex(t *testing.T) {
 	}
 }
 
-// --- SGR encoding ---
+// --- left pane: forward-to-child translation ---
 
-func TestEncodeSGRMouse(t *testing.T) {
-	tests := []struct {
-		name string
-		ev   tea.MouseMsg
-		want []byte
-	}{
-		{"left press", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}, []byte("\x1b[<0;5;3M")},
-		{"left release", tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}, []byte("\x1b[<0;5;3m")},
-		{"middle press", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonMiddle}, []byte("\x1b[<1;5;3M")},
-		{"right press", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonRight}, []byte("\x1b[<2;5;3M")},
-		{"wheel up", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp}, []byte("\x1b[<64;5;3M")},
-		{"wheel down", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}, []byte("\x1b[<65;5;3M")},
-		{"drag with left button held", tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft}, []byte("\x1b[<32;5;3M")},
-		{"shift+left press", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Shift: true}, []byte("\x1b[<4;5;3M")},
-		{"ctrl+right press", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonRight, Ctrl: true}, []byte("\x1b[<18;5;3M")},
-		{"alt+middle press", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonMiddle, Alt: true}, []byte("\x1b[<9;5;3M")},
-		{"backward press", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonBackward}, []byte("\x1b[<128;5;3M")},
-		{"forward press", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonForward}, []byte("\x1b[<129;5;3M")},
-		{"no button and no motion: nothing to encode", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonNone}, nil},
-		{"unmapped extra button", tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButton10}, nil},
+// TestOnLeftPaneMouseForwardsTranslatedCoordinates checks the part of mouse
+// forwarding that's still the TUI's job now that gating on the child's
+// opt-in lives entirely in terminal.VT: hit-testing the click into the
+// pane's content area and translating it to the emulator's 0-based
+// coordinate space.
+func TestOnLeftPaneMouseForwardsTranslatedCoordinates(t *testing.T) {
+	screen := &fakeEmulator{}
+	m := Model{
+		width:  100,
+		height: 40,
+		fi:     newFilter(),
+		vp:     viewport.New(0, 0),
+		screen: screen,
+		target: &runner.Target{},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := encodeSGRMouse(tc.ev, 5, 3)
-			if string(got) != string(tc.want) {
-				t.Errorf("encodeSGRMouse(%+v, 5, 3) = %q, want %q", tc.ev, got, tc.want)
-			}
-		})
+	left, _ := m.paneRects()
+	ev := tea.MouseMsg{X: left.X + 2, Y: left.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+
+	newModel, cmd := m.Update(ev)
+	if cmd != nil {
+		t.Errorf("mouse click should not produce a command, got %v", cmd)
+	}
+	if got := newModel.(Model).focus; got != focusTerminal {
+		t.Errorf("clicking the left pane should focus the terminal, got focus=%v", got)
+	}
+
+	if len(screen.forwarded) != 1 {
+		t.Fatalf("want exactly one forwarded event, got %d: %+v", len(screen.forwarded), screen.forwarded)
+	}
+	want := terminal.MouseEvent{X: 1, Y: 1, Button: terminal.MouseButtonLeft, Action: terminal.MouseActionPress}
+	if got := screen.forwarded[0]; got != want {
+		t.Errorf("forwarded event = %+v, want %+v", got, want)
 	}
 }
 
-// --- left pane: forward-to-child gating ---
-
-// TestOnLeftPaneMouseForwardsOnlyWithSGR pins the safety rule: cli-capture
-// must never write mouse-shaped bytes into a child that didn't ask for them,
-// and legacy X10-only mouse mode (enabled without SGR) is explicitly out of
-// scope, so it should forward nothing either.
-func TestOnLeftPaneMouseForwardsOnlyWithSGR(t *testing.T) {
-	tests := []struct {
-		name        string
-		enabled     bool
-		sgr         bool
-		wantForward bool
-	}{
-		{"mouse not enabled", false, false, false},
-		{"mouse enabled, X10 only (no SGR)", true, false, false},
-		{"mouse enabled with SGR", true, true, true},
+// TestOnLeftPaneMouseBorderClickDoesNotForward guards the hit-testing: a
+// click that lands on the pane's border (not its content area) must still
+// focus the terminal pane, but must never reach the emulator.
+func TestOnLeftPaneMouseBorderClickDoesNotForward(t *testing.T) {
+	screen := &fakeEmulator{}
+	m := Model{
+		width:  100,
+		height: 40,
+		fi:     newFilter(),
+		vp:     viewport.New(0, 0),
+		screen: screen,
+		target: &runner.Target{},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatalf("os.Pipe: %v", err)
-			}
-			defer r.Close()
+	left, _ := m.paneRects()
+	ev := tea.MouseMsg{X: left.X, Y: left.Y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft} // top-left border cell
 
-			m := Model{
-				width:  100,
-				height: 40,
-				fi:     newFilter(),
-				vp:     viewport.New(0, 0),
-				screen: &fakeEmulator{mouseEnabled: tc.enabled, mouseSGR: tc.sgr},
-				target: &runner.Target{Pty: w},
-			}
-			left, _ := m.paneRects()
-			ev := tea.MouseMsg{X: left.X + 2, Y: left.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
-
-			newModel, cmd := m.Update(ev)
-			if cmd != nil {
-				t.Errorf("mouse click should not produce a command, got %v", cmd)
-			}
-			if got := newModel.(Model).focus; got != focusTerminal {
-				t.Errorf("clicking the left pane should focus the terminal, got focus=%v", got)
-			}
-
-			if err := w.Close(); err != nil {
-				t.Fatalf("close write end: %v", err)
-			}
-			buf := make([]byte, 64)
-			n, _ := r.Read(buf)
-			got := string(buf[:n])
-
-			if tc.wantForward {
-				if !strings.HasPrefix(got, "\x1b[<0;2;2M") {
-					t.Errorf("expected the click forwarded as SGR mouse bytes, got %q", got)
-				}
-			} else if got != "" {
-				t.Errorf("expected nothing forwarded to the child, got %q", got)
-			}
-		})
+	newModel, _ := m.Update(ev)
+	if got := newModel.(Model).focus; got != focusTerminal {
+		t.Errorf("clicking the left pane's border should still focus the terminal, got focus=%v", got)
+	}
+	if len(screen.forwarded) != 0 {
+		t.Errorf("border click should not forward anything, got %+v", screen.forwarded)
 	}
 }
 

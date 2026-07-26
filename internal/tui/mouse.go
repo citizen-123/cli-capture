@@ -1,10 +1,9 @@
 package tui
 
 import (
-	"fmt"
-	"log"
-
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/citizen-123/cli-capture/internal/terminal"
 )
 
 // rect is a half-open screen region: columns [X, X+W), rows [Y, Y+H). Mouse
@@ -59,20 +58,15 @@ func (m Model) onMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil // the status bar row, or the sliver past the two panes
 }
 
-// onLeftPaneMouse focuses the terminal pane and, only when the child has
-// opted into SGR mouse reporting, forwards the event into its PTY translated
-// to coordinates relative to the pane's content area.
+// onLeftPaneMouse focuses the terminal pane and forwards the event to the
+// emulator, translated to coordinates relative to the pane's content area.
+// Whether the child actually asked for mouse input — and how it gets
+// encoded — is the emulator's call (see terminal.Emulator.ForwardMouse); the
+// TUI's only job is the hit-testing and the coordinate translation.
 func (m Model) onLeftPaneMouse(ev tea.MouseMsg, box rect) (tea.Model, tea.Cmd) {
 	m.focus = focusTerminal
-	if m.target == nil || m.screen == nil || !m.screen.MouseEnabled() {
-		return m, nil // the child never asked for mouse input
-	}
-	if !m.screen.MouseSGR() {
-		// Legacy X10 mouse encoding caps coordinates at 223 and packs the
-		// button into a single byte with a different offset than SGR; it's
-		// out of scope here, so a child that enables mouse tracking without
-		// also asking for SGR (mode 1006) gets nothing forwarded.
-		return m, nil
+	if m.target == nil || m.screen == nil {
+		return m, nil // no child to forward into yet, or it has already exited
 	}
 
 	cols, rows := contentGrid(box)
@@ -82,14 +76,60 @@ func (m Model) onLeftPaneMouse(ev tea.MouseMsg, box rect) (tea.Model, tea.Cmd) {
 		return m, nil // landed on the border or the unused content margin
 	}
 
-	b := encodeSGRMouse(ev, col+1, row+1) // SGR coordinates are 1-based
-	if b == nil {
-		return m, nil
-	}
-	if _, err := m.target.Pty.Write(b); err != nil {
-		log.Printf("Encountered error while forwarding mouse event to target PTY. Error: %v, Event: %s", err, ev)
+	if me, ok := toMouseEvent(ev, col, row); ok {
+		m.screen.ForwardMouse(me)
 	}
 	return m, nil
+}
+
+// mouseButtons maps bubbletea's mouse button vocabulary onto the terminal
+// package's neutral one — the one place tea.MouseMsg crosses into the
+// terminal package's types, so terminal itself never needs to import
+// bubbletea.
+var mouseButtons = map[tea.MouseButton]terminal.MouseButton{
+	tea.MouseButtonNone:       terminal.MouseButtonNone,
+	tea.MouseButtonLeft:       terminal.MouseButtonLeft,
+	tea.MouseButtonMiddle:     terminal.MouseButtonMiddle,
+	tea.MouseButtonRight:      terminal.MouseButtonRight,
+	tea.MouseButtonWheelUp:    terminal.MouseButtonWheelUp,
+	tea.MouseButtonWheelDown:  terminal.MouseButtonWheelDown,
+	tea.MouseButtonWheelLeft:  terminal.MouseButtonWheelLeft,
+	tea.MouseButtonWheelRight: terminal.MouseButtonWheelRight,
+	tea.MouseButtonBackward:   terminal.MouseButtonBackward,
+	tea.MouseButtonForward:    terminal.MouseButtonForward,
+	tea.MouseButton10:         terminal.MouseButton10,
+	tea.MouseButton11:         terminal.MouseButton11,
+}
+
+// toMouseEvent translates a bubbletea mouse message, already known to have
+// landed inside the terminal pane's content area at (col, row), into the
+// terminal package's neutral MouseEvent. ok is false for events with nothing
+// worth forwarding: no button held and nothing moving.
+func toMouseEvent(ev tea.MouseMsg, col, row int) (terminal.MouseEvent, bool) {
+	button, ok := mouseButtons[ev.Button]
+	if !ok {
+		return terminal.MouseEvent{}, false // a button cli-capture doesn't map
+	}
+	if button == terminal.MouseButtonNone && ev.Action != tea.MouseActionMotion {
+		return terminal.MouseEvent{}, false // no button held and nothing moving: nothing to forward
+	}
+
+	action := terminal.MouseActionPress
+	switch ev.Action {
+	case tea.MouseActionRelease:
+		action = terminal.MouseActionRelease
+	case tea.MouseActionMotion:
+		action = terminal.MouseActionMotion
+	}
+
+	return terminal.MouseEvent{
+		X: col, Y: row,
+		Button: button,
+		Action: action,
+		Shift:  ev.Shift,
+		Alt:    ev.Alt,
+		Ctrl:   ev.Ctrl,
+	}, true
 }
 
 // onRightPaneMouse focuses the traffic pane, and either scrolls (wheel) or
@@ -192,68 +232,4 @@ func flowRowIndex(y, h, nVis, selected int, filterLineShown, pausedShown bool) (
 func (m Model) clickedFlowIndex(y, h int) (idx int, ok bool) {
 	filterLineShown := m.filtering || m.fi.Value() != ""
 	return flowRowIndex(y, h, len(m.visible()), m.selected, filterLineShown, m.paused != nil)
-}
-
-// encodeSGRMouse turns a bubbletea mouse event into the SGR (xterm mode 1006)
-// escape sequence a target expects on stdin: ESC [ < Cb ; Cx ; Cy M (press or
-// motion) or m (release), with Cx/Cy 1-based. Returns nil when the event
-// carries nothing worth forwarding (an extra button cli-capture doesn't map,
-// or bare motion with no button held).
-func encodeSGRMouse(ev tea.MouseMsg, col, row int) []byte {
-	const (
-		bitShift  = 0b0000_0100
-		bitAlt    = 0b0000_1000
-		bitCtrl   = 0b0001_0000
-		bitMotion = 0b0010_0000
-		bitWheel  = 0b0100_0000
-		bitAdd    = 0b1000_0000
-	)
-
-	var cb int
-	switch ev.Button {
-	case tea.MouseButtonLeft:
-		cb = 0
-	case tea.MouseButtonMiddle:
-		cb = 1
-	case tea.MouseButtonRight:
-		cb = 2
-	case tea.MouseButtonWheelUp:
-		cb = bitWheel | 0
-	case tea.MouseButtonWheelDown:
-		cb = bitWheel | 1
-	case tea.MouseButtonWheelLeft:
-		cb = bitWheel | 2
-	case tea.MouseButtonWheelRight:
-		cb = bitWheel | 3
-	case tea.MouseButtonBackward:
-		cb = bitAdd | 0
-	case tea.MouseButtonForward:
-		cb = bitAdd | 1
-	case tea.MouseButtonNone:
-		if ev.Action != tea.MouseActionMotion {
-			return nil // no button held and nothing moving: nothing to encode
-		}
-		cb = 3 // "no button" motion, per the SGR/X10 convention
-	default:
-		return nil // buttons 10/11 aren't mapped; nothing sane to forward
-	}
-
-	if ev.Action == tea.MouseActionMotion && !tea.MouseEvent(ev).IsWheel() {
-		cb |= bitMotion
-	}
-	if ev.Shift {
-		cb |= bitShift
-	}
-	if ev.Alt {
-		cb |= bitAlt
-	}
-	if ev.Ctrl {
-		cb |= bitCtrl
-	}
-
-	final := byte('M')
-	if ev.Action == tea.MouseActionRelease {
-		final = 'm'
-	}
-	return []byte(fmt.Sprintf("\x1b[<%d;%d;%d%c", cb, col, row, final))
 }

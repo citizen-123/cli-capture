@@ -167,10 +167,18 @@ func main() {
 	}
 	defer target.Close()
 
-	// Feeds bridging the plumbing to the UI's Elm loop. A full VT emulator (not
-	// the line buffer) so full-screen TUI targets render correctly; its query
-	// replies go back to the target's PTY input.
+	// Feeds bridging the plumbing to the UI's Elm loop. A full VT emulator so
+	// full-screen TUI targets render correctly; its query replies (and
+	// forwarded mouse events) go back to the target's PTY input. Closing it
+	// stops its reply-pump goroutine; do that before target.Close() (which
+	// runs first, since defers are LIFO) so nothing writes to the PTY after
+	// it's gone.
 	screen := terminal.NewVT(80, 24, target.Pty)
+	defer func() {
+		if err := screen.Close(); err != nil {
+			log.Printf("Encountered %v while closing the terminal emulator.", err)
+		}
+	}()
 	ptyCh := make(chan struct{}, 1)
 	pauseCh := make(chan tui.Paused, 16)
 

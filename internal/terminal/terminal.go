@@ -14,25 +14,22 @@ import (
 	"sync"
 )
 
-// Emulator consumes PTY bytes and renders a viewport of the given size.
+// Emulator consumes PTY bytes and renders a viewport of the given size, and
+// turns mouse events over that viewport into whatever the emulated child
+// actually asked for.
 type Emulator interface {
 	Write(p []byte) (int, error)
 	Render(width, height int) string
 	// Resize informs the emulator of the terminal grid size. Line-oriented
 	// emulators may ignore it; grid emulators must track it for correct layout.
 	Resize(cols, rows int)
-	// MouseEnabled reports whether the hosted child has turned on any of the
-	// xterm mouse-reporting modes (X10, button, motion, or "any event"). The
-	// TUI uses this to decide whether left-pane mouse events should be
-	// forwarded to the child at all — forwarding into an app that never asked
-	// for mouse input would just inject garbage keystrokes.
-	MouseEnabled() bool
-	// MouseSGR reports whether the child additionally asked for SGR (mode
-	// 1006) coordinate encoding, on top of MouseEnabled. cli-capture only
-	// forwards mouse events when both are true; legacy X10 encoding (which
-	// caps coordinates at 223) is out of scope, so a child that enabled mouse
-	// reporting without SGR gets no forwarded events at all.
-	MouseSGR() bool
+	// ForwardMouse translates a mouse event landing on the pane's content
+	// grid into the terminal's native mouse-reporting protocol and feeds it
+	// to the emulated child. Whether anything is actually sent — and in
+	// which encoding — is entirely the emulator's call: a child that never
+	// opted into mouse tracking via DECSET gets nothing at all, so callers
+	// don't need to ask first whether forwarding is safe.
+	ForwardMouse(ev MouseEvent)
 }
 
 // Screen is the default Emulator: a growing scrollback of finished lines plus
@@ -49,12 +46,9 @@ func New() *Screen { return &Screen{maxLines: 5000} }
 // Resize is a no-op for the line-oriented Screen; it clips to the render width.
 func (s *Screen) Resize(cols, rows int) {}
 
-// MouseEnabled is always false: Screen has no mode-tracking state, so it never
-// asked the child anything and never claims mouse support.
-func (s *Screen) MouseEnabled() bool { return false }
-
-// MouseSGR is always false, for the same reason as MouseEnabled.
-func (s *Screen) MouseSGR() bool { return false }
+// ForwardMouse is a no-op: Screen has no mode-tracking state, so it never
+// asked the child anything and never has anywhere sane to forward a click.
+func (s *Screen) ForwardMouse(ev MouseEvent) {}
 
 func (s *Screen) Write(p []byte) (int, error) {
 	s.mu.Lock()

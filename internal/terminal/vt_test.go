@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -23,13 +24,18 @@ func stripANSI(s string) string {
 	return b.String()
 }
 
-// TestVTAbsolutePositioning is the capability the line-oriented Screen lacked:
-// a target that jumps the cursor to an absolute row/column and writes there —
-// the way full-screen TUIs (claude, vim) paint — must land in the right cell.
+// TestVTAbsolutePositioning is the capability the line-oriented Screen this
+// package used to fall back on lacked: a target that jumps the cursor to an
+// absolute row/column and writes there — the way full-screen TUIs (claude,
+// vim) paint — must land in the right cell.
 func TestVTAbsolutePositioning(t *testing.T) {
 	vt := NewVT(20, 5, nil)
-	vt.Write([]byte("\x1b[2J"))        // clear screen
-	vt.Write([]byte("\x1b[3;5HHELLO")) // move to row 3, col 5, then write
+	if _, err := vt.Write([]byte("\x1b[2J")); err != nil { // clear screen
+		t.Fatalf("Write(clear): %v", err)
+	}
+	if _, err := vt.Write([]byte("\x1b[3;5HHELLO")); err != nil { // move to row 3, col 5, then write
+		t.Fatalf("Write(HELLO): %v", err)
+	}
 
 	lines := strings.Split(stripANSI(vt.Render(20, 5)), "\n")
 	if len(lines) < 3 {
@@ -45,9 +51,11 @@ func TestVTAbsolutePositioning(t *testing.T) {
 // TestVTColorsSurvive checks that SGR color attributes reach the rendered pane.
 func TestVTColorsSurvive(t *testing.T) {
 	vt := NewVT(10, 2, nil)
-	vt.Write([]byte("\x1b[31mRED"))
+	if _, err := vt.Write([]byte("\x1b[31mRED")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
 	out := vt.Render(10, 2)
-	if strings.Index(out, "\x1b[") < 0 {
+	if !strings.Contains(out, "\x1b[") {
 		t.Fatalf("render should contain SGR escapes: %q", out)
 	}
 	if !strings.Contains(stripANSI(out), "RED") {
@@ -59,11 +67,59 @@ func TestVTColorsSurvive(t *testing.T) {
 // buffer couldn't model.
 func TestVTClearAndOverwrite(t *testing.T) {
 	vt := NewVT(10, 2, nil)
-	vt.Write([]byte("first"))
-	vt.Write([]byte("\x1b[2J\x1b[H")) // clear, home
-	vt.Write([]byte("second"))
+	if _, err := vt.Write([]byte("first")); err != nil {
+		t.Fatalf("Write(first): %v", err)
+	}
+	if _, err := vt.Write([]byte("\x1b[2J\x1b[H")); err != nil { // clear, home
+		t.Fatalf("Write(clear+home): %v", err)
+	}
+	if _, err := vt.Write([]byte("second")); err != nil {
+		t.Fatalf("Write(second): %v", err)
+	}
 	out := stripANSI(vt.Render(10, 2))
 	if !strings.Contains(out, "second") || strings.Contains(out, "first") {
 		t.Errorf("after clear+rewrite, want 'second' not 'first': %q", out)
+	}
+}
+
+// TestVTRenderClipsToRequestedSize pins the behaviour that survived the
+// vt10x → x/vt swap unchanged: Render resizes the emulator to width×height
+// and never returns more rows or columns than asked, even though the
+// emulator itself may be tracking a larger grid.
+func TestVTRenderClipsToRequestedSize(t *testing.T) {
+	vt := NewVT(40, 10, nil)
+	if _, err := vt.Write([]byte("0123456789ABCDEF")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	out := stripANSI(vt.Render(8, 1))
+	lines := strings.Split(out, "\n")
+	if len(lines) != 1 {
+		t.Fatalf("want 1 rendered row, got %d: %q", len(lines), out)
+	}
+	if len(lines[0]) != 8 {
+		t.Fatalf("want 8 rendered columns, got %d: %q", len(lines[0]), lines[0])
+	}
+	if lines[0] != "01234567" {
+		t.Errorf("clipped row = %q, want %q", lines[0], "01234567")
+	}
+}
+
+// TestVTCloseStopsReplyPumpWithoutLeaking exercises the shutdown path Close
+// exists for: NewVT's pump goroutine is blocked in Read() on an empty pipe,
+// and Close must unblock it (rather than leaving it running forever) before
+// returning.
+func TestVTCloseStopsReplyPumpWithoutLeaking(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer r.Close()
+
+	vt := NewVT(10, 2, w)
+	// Close must return promptly (it blocks on the pump's done channel) —
+	// if the pump were leaking instead of exiting on io.EOF, this call would
+	// hang and the test would time out rather than fail cleanly.
+	if err := vt.Close(); err != nil {
+		t.Errorf("Close: %v", err)
 	}
 }
