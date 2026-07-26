@@ -132,9 +132,26 @@ func colorSGR(c vt10x.Color, fg bool) []string {
 		}
 		return []string{strconv.Itoa(base + int(c))}
 	}
-	// 16–255: xterm 256-color palette
-	if fg {
-		return []string{"38", "5", strconv.Itoa(int(c))}
+	if c < 256 { // 16–255: xterm 256-color palette
+		if fg {
+			return []string{"38", "5", strconv.Itoa(int(c))}
+		}
+		return []string{"48", "5", strconv.Itoa(int(c))}
 	}
-	return []string{"48", "5", strconv.Itoa(int(c))}
+	// 256 … 1<<24: a 24-bit color. vt10x packs these as r<<16|g<<8|b when it
+	// parses SGR 38;2/48;2, sharing the numeric space with palette indices.
+	// Emitting one as a palette index yields a parameter like 38;5;16737280,
+	// which terminals discard — the cell then falls back to the default
+	// foreground, which is why truecolor targets rendered colorless.
+	//
+	// debt: an RGB triple whose packed value lands under 256 (near-black blues,
+	// rgb(0,0,0)–rgb(0,0,255)) is indistinguishable from a palette index in
+	// vt10x's encoding and still renders as palette; upgrade if vt10x gains a
+	// distinct truecolor flag or we vendor a patched fork.
+	lead := "38"
+	if !fg {
+		lead = "48"
+	}
+	r, g, b := (c>>16)&0xff, (c>>8)&0xff, c&0xff
+	return []string{lead, "2", strconv.Itoa(int(r)), strconv.Itoa(int(g)), strconv.Itoa(int(b))}
 }
