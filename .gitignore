@@ -1,0 +1,4 @@
+/cli-capture
+*.log
+# local CA / config
+/.cli-capture/
