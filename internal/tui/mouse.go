@@ -83,10 +83,53 @@ func (m Model) onLeftPaneMouse(ev tea.MouseMsg, box rect) (tea.Model, tea.Cmd) {
 		return m, nil // landed on the border or the unused content margin
 	}
 
+	if key, ok := wheelPageKey(ev); ok {
+		if m.target.Pty == nil {
+			return m, nil // target constructed but not started
+		}
+		if _, err := m.target.Pty.Write(key); err != nil {
+			m.status = "scroll: " + err.Error()
+		}
+		return m, nil
+	}
+
 	if me, ok := toMouseEvent(ev, col, row); ok {
 		m.screen.ForwardMouse(me)
 	}
 	return m, nil
+}
+
+// Page-key sequences, in the form a child on the alternate screen expects.
+var (
+	keyPageUp   = []byte("\x1b[5~")
+	keyPageDown = []byte("\x1b[6~")
+)
+
+// wheelPageKey turns a vertical wheel notch over the terminal pane into a
+// PgUp/PgDn keypress instead of a mouse-wheel report.
+//
+// Forwarding the wheel verbatim is technically the faithful thing to do, and it
+// is what a child with mouse tracking on receives from a normal terminal — but
+// full-screen targets then scroll a line or so per notch, which reads like
+// tapping the arrow keys and takes forever to get anywhere in a long
+// transcript. Sending page keys makes the wheel move a screenful, which is what
+// scrolling a hosted app is actually for.
+//
+// Only the vertical wheel is remapped. Clicks, drags and horizontal wheel still
+// forward untouched, so a child's clickable UI keeps working.
+func wheelPageKey(ev tea.MouseMsg) ([]byte, bool) {
+	// Wheel notches arrive as presses; ignore the release/motion companions so
+	// one notch doesn't page twice.
+	if ev.Action != tea.MouseActionPress {
+		return nil, false
+	}
+	switch ev.Button {
+	case tea.MouseButtonWheelUp:
+		return keyPageUp, true
+	case tea.MouseButtonWheelDown:
+		return keyPageDown, true
+	}
+	return nil, false
 }
 
 // mouseButtons maps bubbletea's mouse button vocabulary onto the terminal
