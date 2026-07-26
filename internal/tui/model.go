@@ -74,6 +74,11 @@ type Model struct {
 	showHelp      bool   // floating help overlay
 	sessionPath   string // where "save session" writes
 	status        string
+	// mouseCapture tracks whether cli-capture is asking bubbletea to report
+	// mouse events. Capturing the mouse steals native terminal-emulator text
+	// selection/copy-paste, so the operator needs a way to hand it back
+	// without restarting — see the leader "m" command.
+	mouseCapture bool
 	// leader is the tmux-style prefix: press it, then a command key. Only this
 	// one chord is taken from the target — everything else in the terminal pane
 	// passes through untouched — so it is configurable via -leader for operators
@@ -94,6 +99,9 @@ func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, 
 		fi:          newFilter(),
 		sessionPath: sessionPath,
 		leader:      leader,
+		// main.go starts the tea.Program with tea.WithMouseCellMotion(); this
+		// mirrors that so the leader "m" toggle's first press turns capture off.
+		mouseCapture: true,
 		status: fmt.Sprintf("? for help · %[1]s w switch pane · %[1]s i arm intercept · %[1]s q quit",
 			leader.Name),
 	}
@@ -507,10 +515,28 @@ func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = m.exportHAR()
 	case "f":
 		m.status = m.exportFlagged()
+	case "m":
+		return m.toggleMouseCapture()
 	case "?":
 		m.showHelp = !m.showHelp
 	}
 	return m, nil
+}
+
+// toggleMouseCapture flips whether cli-capture asks bubbletea to report mouse
+// events. Capturing steals the terminal emulator's own text selection and
+// copy-paste, so this is the re-entrant escape hatch: toggle off to select
+// text natively, then toggle back on — no restart needed either way, since
+// EnableMouseCellMotion/DisableMouse just re-issue the DECSET/DECRST
+// sequences bubbletea already knows how to send.
+func (m Model) toggleMouseCapture() (tea.Model, tea.Cmd) {
+	m.mouseCapture = !m.mouseCapture
+	if m.mouseCapture {
+		m.status = fmt.Sprintf("mouse capture ON — %s m to turn it off for native text selection", m.leader.Name)
+		return m, tea.EnableMouseCellMotion
+	}
+	m.status = fmt.Sprintf("mouse capture OFF (native selection works) — %s m to turn it back on", m.leader.Name)
+	return m, tea.DisableMouse
 }
 
 // onEditKey handles keys while the raw editor is open. Ctrl+S forwards the

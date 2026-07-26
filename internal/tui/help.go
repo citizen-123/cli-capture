@@ -23,6 +23,7 @@ func helpSections(leader string) []helpSection {
 			{"s", "save session to JSON"},
 			{"h", "export session as HAR"},
 			{"f", "export flagged flows → flagged.txt"},
+			{"m", "toggle mouse capture (off restores native text selection)"},
 			{"?", "toggle this help"},
 			{"q", "quit"},
 			{leader, "send a literal " + leader + " to the target"},

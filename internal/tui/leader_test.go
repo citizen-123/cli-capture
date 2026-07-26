@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -77,5 +79,45 @@ func TestHelpAdvertisesTheConfiguredLeader(t *testing.T) {
 	}
 	if last := secs[0].rows[len(secs[0].rows)-1]; last.key != "Ctrl+Space" {
 		t.Errorf("literal-passthrough row key = %q, want Ctrl+Space", last.key)
+	}
+}
+
+// TestLeaderToggleMouseCaptureIsReentrant pins the escape hatch for mouse
+// capture: it must round-trip (off, then back on) without wedging the model,
+// each transition must return the matching bubbletea mouse command, and the
+// status line must name whatever leader is actually configured — never a
+// hardcoded "Ctrl+A" — so the operator knows how to get back.
+func TestLeaderToggleMouseCaptureIsReentrant(t *testing.T) {
+	m := Model{leader: Leader{Name: "Ctrl+Q"}, mouseCapture: true}
+	toggle := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")}
+
+	offModel, offCmd := m.leaderCommand(toggle)
+	off := offModel.(Model)
+	if off.mouseCapture {
+		t.Fatal("first toggle should turn mouse capture off")
+	}
+	if offCmd == nil {
+		t.Fatal("toggling off should return a command")
+	}
+	if got, want := reflect.TypeOf(offCmd()), reflect.TypeOf(tea.DisableMouse()); got != want {
+		t.Errorf("toggle-off command produced %v, want the type DisableMouse produces (%v)", got, want)
+	}
+	if !strings.Contains(off.status, "OFF") || !strings.Contains(off.status, "Ctrl+Q") {
+		t.Errorf("status should report OFF and name the configured leader, got %q", off.status)
+	}
+
+	onModel, onCmd := off.leaderCommand(toggle)
+	on := onModel.(Model)
+	if !on.mouseCapture {
+		t.Fatal("second toggle should turn mouse capture back on (re-entrant)")
+	}
+	if onCmd == nil {
+		t.Fatal("toggling on should return a command")
+	}
+	if got, want := reflect.TypeOf(onCmd()), reflect.TypeOf(tea.EnableMouseCellMotion()); got != want {
+		t.Errorf("toggle-on command produced %v, want the type EnableMouseCellMotion produces (%v)", got, want)
+	}
+	if !strings.Contains(on.status, "ON") || !strings.Contains(on.status, "Ctrl+Q") {
+		t.Errorf("status should report ON and name the configured leader, got %q", on.status)
 	}
 }
