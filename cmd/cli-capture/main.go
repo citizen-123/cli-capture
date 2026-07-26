@@ -182,7 +182,7 @@ func main() {
 
 	feeds := tui.Feeds{Events: store.Subscribe(), Pty: ptyCh, Pause: pauseCh}
 	model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json"), leader)
-	prog := tea.NewProgram(model, tea.WithAltScreen())
+	prog := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	// Quit the UI when the child exits.
 	go func() {

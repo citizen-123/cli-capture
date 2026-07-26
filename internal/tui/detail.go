@@ -7,51 +7,24 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
 
-// jsonExpandStyle marks content this view has decoded from a JSON string —
-// an embedded JSON payload or escaped-newline text — rather than what was
-// literally on the wire. It is deliberately its own style, not a reuse of
-// jsonKeyStyle/jsonStrStyle/etc., because those label JSON token *kinds*
-// while this one labels a render-time transform: the reader must never
-// confuse "this is what the string contained, unescaped" with "this is what
-// the string looked like on the wire," since verbatim capture is the whole
-// point of this tool.
-var jsonExpandStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Italic(true)
-
-// maxEmbedDepth bounds how many levels of JSON-embedded-in-a-JSON-string this
-// view will unwrap (tool-call args containing tool-call args containing MCP
-// payloads, and so on). Captured traffic is adversarial by construction —
-// this is a MITM proxy sitting on a target process's own bytes — so a
-// malicious or malformed payload could otherwise nest escaped JSON arbitrarily
-// deep and blow up render time/stack depth for no operator benefit. Six
-// levels comfortably covers real agent/tool-call nesting seen in practice
-// while keeping a hard ceiling.
-const maxEmbedDepth = 6
-
 // wrapDetail renders a flow's detail and hard-wraps it to width. Hardwrap is
 // ANSI-aware, so the JSON syntax colors are preserved across wrap points and
 // long lines (big token strings, URLs) no longer clip off the right edge.
-// Expansion of embedded JSON/escaped-newline strings is always on here; a
-// future UI toggle can call renderFlowDetail directly with expand=false.
 func wrapDetail(f *capture.Flow, width int) string {
 	if width < 1 {
 		width = 80
 	}
-	return ansi.Hardwrap(renderFlowDetail(f, width, true), width, false)
+	return ansi.Hardwrap(renderFlowDetail(f, width), width, false)
 }
 
 // renderFlowDetail formats a full view of one flow: metadata, request and
 // response (headers + body), and the ordered message list for streaming flows.
-// expand controls whether JSON-string bodies get their embedded
-// JSON/escaped-newline values unwrapped (see prettyJSON) — a pure parameter
-// rather than a package-level flag so a caller can render either way without
-// touching shared state.
-func renderFlowDetail(f *capture.Flow, width int, expand bool) string {
+func renderFlowDetail(f *capture.Flow, width int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s  %s\n", f.Protocol, f.Title())
 	fmt.Fprintf(&b, "server %s   sni %s   secure %v   status %s\n",
@@ -62,11 +35,11 @@ func renderFlowDetail(f *capture.Flow, width int, expand bool) string {
 
 	if f.Request != nil {
 		b.WriteString("\n" + sectionStyle.Render("── REQUEST ──") + "\n")
-		b.WriteString(renderMessage(f.Request, width, expand))
+		b.WriteString(renderMessage(f.Request, width))
 	}
 	if f.Response != nil {
 		b.WriteString("\n" + sectionStyle.Render("── RESPONSE ──") + "\n")
-		b.WriteString(renderMessage(f.Response, width, expand))
+		b.WriteString(renderMessage(f.Response, width))
 	}
 	if len(f.Messages) > 0 {
 		fmt.Fprintf(&b, "\n%s\n", sectionStyle.Render(fmt.Sprintf("── MESSAGES (%d) ──", len(f.Messages))))
@@ -77,14 +50,14 @@ func renderFlowDetail(f *capture.Flow, width int, expand bool) string {
 			}
 			fmt.Fprintf(&b, "%s %s\n", m.Direction, m.Summary)
 			if len(m.Body) > 0 {
-				b.WriteString(indent(bodyPreview(m.Body, expand), "    ") + "\n")
+				b.WriteString(indent(bodyPreview(m.Body), "    ") + "\n")
 			}
 		}
 	}
 	return b.String()
 }
 
-func renderMessage(m *capture.Message, width int, expand bool) string {
+func renderMessage(m *capture.Message, width int) string {
 	var b strings.Builder
 	for _, k := range sortedKeys(m.Headers) {
 		for _, v := range m.Headers[k] {
@@ -100,20 +73,19 @@ func renderMessage(m *capture.Message, width int, expand bool) string {
 		}
 	}
 	if len(m.Body) > 0 {
-		b.WriteString("\n" + bodyPreview(m.Body, expand) + "\n")
+		b.WriteString("\n" + bodyPreview(m.Body) + "\n")
 	}
 	return b.String()
 }
 
 // bodyPreview shows JSON pretty-printed and syntax-highlighted, other textual
 // bodies as-is, and binary bodies as a hex dump — all capped so a large body
-// can't flood the pane. expand is threaded straight through to prettyJSON;
-// this function itself never inspects string contents.
-func bodyPreview(body []byte, expand bool) string {
+// can't flood the pane.
+func bodyPreview(body []byte) string {
 	// JSON gets pretty-printed and colored (the detail view is scrollable, so a
 	// larger cap is fine here than for the plain/hex fallbacks).
 	if len(body) <= 256*1024 {
-		if pretty, ok := prettyJSON(body, expand); ok {
+		if pretty, ok := prettyJSON(body); ok {
 			return pretty
 		}
 	}
@@ -138,12 +110,8 @@ func bodyPreview(body []byte, expand bool) string {
 
 // prettyJSON reports whether body is JSON and, if so, returns it indented and
 // syntax-highlighted. json.Indent both validates and pretty-prints; the
-// colorizer then runs over the canonical output. When expand is true, string
-// values that are themselves embedded JSON or escaped-newline text get
-// unwrapped inline (see colorizeJSON/expandString) — a pure parameter, not a
-// package-level flag, so this stays safe to call from anywhere without
-// touching shared state and a future toggle can flip it per render.
-func prettyJSON(body []byte, expand bool) (string, bool) {
+// colorizer then runs over the canonical output.
+func prettyJSON(body []byte) (string, bool) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
 		return "", false // only object/array bodies, to avoid coloring bare strings/numbers
@@ -152,20 +120,13 @@ func prettyJSON(body []byte, expand bool) (string, bool) {
 	if err := json.Indent(&buf, trimmed, "", "  "); err != nil {
 		return "", false
 	}
-	return colorizeJSON(buf.Bytes(), expand, 0), true
+	return colorizeJSON(buf.Bytes()), true
 }
 
 // colorizeJSON walks canonical (already-indented) JSON and applies syntax
 // colors: object keys, string values, numbers, literals, and punctuation. A
 // string is a key when the next non-space character after it is a colon.
-//
-// When expand is true, string VALUES (never keys) are checked for embedded
-// JSON or escaped-newline text and unwrapped inline via expandString;
-// embedDepth tracks how many such unwraps deep we already are so the
-// recursion can be capped at maxEmbedDepth. This never mutates s — it only
-// changes what gets rendered to the screen, so the underlying captured bytes
-// (and every export path, which never calls this) stay verbatim.
-func colorizeJSON(s []byte, expand bool, embedDepth int) string {
+func colorizeJSON(s []byte) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		c := s[i]
@@ -188,16 +149,9 @@ func colorizeJSON(s []byte, expand bool, embedDepth int) string {
 			for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
 				k++
 			}
-			switch {
-			case k < len(s) && s[k] == ':':
+			if k < len(s) && s[k] == ':' {
 				b.WriteString(jsonKeyStyle.Render(str))
-			case expand:
-				if exp, ok := expandString(str, lineIndent(s, i), embedDepth); ok {
-					b.WriteString(exp)
-				} else {
-					b.WriteString(jsonStrStyle.Render(str))
-				}
-			default:
+			} else {
 				b.WriteString(jsonStrStyle.Render(str))
 			}
 			i = j
@@ -224,74 +178,6 @@ func colorizeJSON(s []byte, expand bool, embedDepth int) string {
 		}
 	}
 	return b.String()
-}
-
-// lineIndent returns the leading whitespace of the line containing byte
-// offset pos in s. json.Indent's output uses exactly this indentation to mark
-// nesting depth, so it's what we reuse to align an expanded value under the
-// key that introduced it.
-func lineIndent(s []byte, pos int) string {
-	start := pos
-	for start > 0 && s[start-1] != '\n' {
-		start--
-	}
-	end := start
-	for end < len(s) && (s[end] == ' ' || s[end] == '\t') {
-		end++
-	}
-	return string(s[start:end])
-}
-
-// expandString checks whether a JSON string VALUE token (raw, exactly as it
-// appears in the source — quotes and escapes included) decodes to embedded
-// JSON or to text containing escaped newlines, and if so returns it expanded
-// and visibly marked. ok is false for anything else (plain text, truncated or
-// merely JSON-shaped-but-invalid content), telling the caller to fall back to
-// normal string coloring. This never panics: captured bodies are frequently
-// truncated mid-string, and a string that merely starts with '{' is common
-// (ordinary prose) and must not be treated as JSON.
-func expandString(raw, prefix string, embedDepth int) (string, bool) {
-	var decoded string
-	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-		return "", false // not a well-formed JSON string literal (e.g. truncated capture)
-	}
-
-	if embedDepth < maxEmbedDepth {
-		trimmed := strings.TrimSpace(decoded)
-		if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') && json.Valid([]byte(trimmed)) {
-			// Indent with an empty prefix so nesting is relative to zero; we add
-			// our own prefix+marker to every resulting line below, uniformly.
-			var buf bytes.Buffer
-			if err := json.Indent(&buf, []byte(trimmed), "", "  "); err == nil {
-				inner := colorizeJSON(buf.Bytes(), true, embedDepth+1)
-				return markExpanded("↳ expanded JSON", inner, prefix), true
-			}
-		}
-	}
-
-	if strings.Contains(decoded, "\n") {
-		lines := strings.Split(decoded, "\n")
-		for i, ln := range lines {
-			lines[i] = jsonStrStyle.Render(strings.TrimSuffix(ln, "\r"))
-		}
-		return markExpanded("↳ expanded (escaped \\n)", strings.Join(lines, "\n"), prefix), true
-	}
-
-	return "", false
-}
-
-// markExpanded prefixes every line of content with prefix plus a distinctly
-// styled bar, and labels the block, so decoded/render-time content can never
-// be mistaken for what was literally on the wire — even if the view is
-// scrolled to a point where the label itself isn't visible, the bar on every
-// line still carries the signal.
-func markExpanded(label, content, prefix string) string {
-	bar := prefix + jsonExpandStyle.Render("┃ ")
-	lines := strings.Split(content, "\n")
-	for i, ln := range lines {
-		lines[i] = bar + ln
-	}
-	return jsonExpandStyle.Render(label) + "\n" + strings.Join(lines, "\n")
 }
 
 func isMostlyPrintable(b []byte) bool {

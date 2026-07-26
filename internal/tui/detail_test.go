@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -24,7 +23,7 @@ func TestRenderFlowDetailHTTP(t *testing.T) {
 	}
 	f.Response = &capture.Message{Direction: capture.ServerToClient, Summary: "200 OK", Body: []byte("world")}
 
-	out := renderFlowDetail(f, 80, true)
+	out := renderFlowDetail(f, 80)
 	for _, want := range []string{"REQUEST", "RESPONSE", "Authorization: Bearer xyz", "hello", "world", "api.example.com"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("detail missing %q:\n%s", want, out)
@@ -34,29 +33,20 @@ func TestRenderFlowDetailHTTP(t *testing.T) {
 
 func TestBodyPreviewHexForBinary(t *testing.T) {
 	binary := []byte{0x00, 0x01, 0x02, 0xff, 0xfe, 0x80}
-	out := bodyPreview(binary, true)
+	out := bodyPreview(binary)
 	if !strings.Contains(out, "00 01 02 ff fe 80") {
 		t.Errorf("binary body should hex-dump: %q", out)
 	}
 
 	text := []byte("plain readable text")
-	if got := bodyPreview(text, true); got != "plain readable text" {
+	if got := bodyPreview(text); got != "plain readable text" {
 		t.Errorf("text body should render as-is, got %q", got)
-	}
-}
-
-func TestBodyPreviewEmpty(t *testing.T) {
-	if got := bodyPreview([]byte{}, true); got != "" {
-		t.Errorf("empty body should render as empty, got %q", got)
-	}
-	if got := bodyPreview(nil, false); got != "" {
-		t.Errorf("nil body should render as empty, got %q", got)
 	}
 }
 
 func TestPrettyJSON(t *testing.T) {
 	body := []byte(`{"name":"ada","age":36,"admin":true,"tags":["x","y"]}`)
-	out, ok := prettyJSON(body, true)
+	out, ok := prettyJSON(body)
 	if !ok {
 		t.Fatal("prettyJSON should detect a JSON object")
 	}
@@ -68,140 +58,24 @@ func TestPrettyJSON(t *testing.T) {
 			t.Errorf("pretty JSON lost %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "expanded") {
-		t.Errorf("plain JSON with no embedded strings should show no expansion marker:\n%s", out)
-	}
 }
 
 func TestPrettyJSONRejectsNonJSON(t *testing.T) {
-	if _, ok := prettyJSON([]byte("hello world"), true); ok {
+	if _, ok := prettyJSON([]byte("hello world")); ok {
 		t.Error("plain text should not be treated as JSON")
 	}
-	if _, ok := prettyJSON([]byte(`{"bad": }`), true); ok {
+	if _, ok := prettyJSON([]byte(`{"bad": }`)); ok {
 		t.Error("invalid JSON should be rejected")
 	}
-	if _, ok := prettyJSON([]byte(`"just a string"`), true); ok {
+	if _, ok := prettyJSON([]byte(`"just a string"`)); ok {
 		t.Error("a bare JSON string should not be prettified")
-	}
-}
-
-func TestPrettyJSONTruncatedOrMalformed(t *testing.T) {
-	// Captured traffic is frequently truncated mid-body or mid-string; this
-	// must degrade to "not JSON" rather than panic.
-	cases := [][]byte{
-		[]byte(`{"a": `),
-		[]byte(`{"a": "unterminated`),
-		[]byte(`{"a": "esc\`),
-		[]byte(`[1, 2,`),
-		[]byte(`{`),
-	}
-	for _, body := range cases {
-		if out, ok := prettyJSON(body, true); ok {
-			t.Errorf("truncated body %q should not be treated as valid JSON, got %q", body, out)
-		}
-	}
-}
-
-func TestPrettyJSONExpandsEmbeddedJSONString(t *testing.T) {
-	// The tool-call-arguments shape: a string value that is itself a JSON
-	// object, escaped one level.
-	body := []byte(`{"input": "{\"command\":\"ls -la\",\"timeout\":30}"}`)
-	out, ok := prettyJSON(body, true)
-	if !ok {
-		t.Fatal("prettyJSON should accept the outer object")
-	}
-	for _, want := range []string{"input", "command", "ls -la", "timeout", "30", "expanded"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("expanded output missing %q:\n%s", want, out)
-		}
-	}
-	// The literal escaped form must not remain — it should have been unwrapped.
-	if strings.Contains(out, `\"command\"`) {
-		t.Errorf("embedded JSON should be unwrapped, not left escaped:\n%s", out)
-	}
-}
-
-func TestPrettyJSONExpandsDoublyNestedJSONString(t *testing.T) {
-	// A payload containing an embedded JSON string that itself contains
-	// another embedded JSON string (MCP-style nesting). Built via json.Marshal
-	// so the escaping is correct by construction rather than hand-typed.
-	leaf := []byte(`{"leaf":true}`)
-	leafStr, err := json.Marshal(string(leaf))
-	if err != nil {
-		t.Fatalf("marshal leaf: %v", err)
-	}
-	inner := []byte(`{"innerKey":` + string(leafStr) + `}`)
-	innerStr, err := json.Marshal(string(inner))
-	if err != nil {
-		t.Fatalf("marshal inner: %v", err)
-	}
-	body := []byte(`{"outer":` + string(innerStr) + `}`)
-
-	out, ok := prettyJSON(body, true)
-	if !ok {
-		t.Fatal("prettyJSON should accept the outer object")
-	}
-	for _, want := range []string{"outer", "innerKey", "leaf", "true"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("doubly-nested expansion missing %q:\n%s", want, out)
-		}
-	}
-	if n := strings.Count(out, "expanded"); n < 2 {
-		t.Errorf("expected two expansion markers (one per nesting level), got %d:\n%s", n, out)
-	}
-}
-
-func TestPrettyJSONExpandsEscapedNewlines(t *testing.T) {
-	body := []byte(`{"text": "line one\nline two\nline three"}`)
-	out, ok := prettyJSON(body, true)
-	if !ok {
-		t.Fatal("prettyJSON should accept the outer object")
-	}
-	for _, want := range []string{"line one", "line two", "line three", "expanded"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("newline-expanded output missing %q:\n%s", want, out)
-		}
-	}
-	// The escaped form ("line one\nline two" as one literal run) must be gone.
-	if strings.Contains(out, `line one\nline two`) {
-		t.Errorf("escaped newline should have been expanded, not left literal:\n%s", out)
-	}
-}
-
-func TestPrettyJSONLeavesJSONShapedPrefixAlone(t *testing.T) {
-	// A string that merely starts with '{' but isn't valid JSON must stay a
-	// plain string — this is ordinary prose ("{not really json"), not a bug.
-	body := []byte(`{"note": "{not really json"}`)
-	out, ok := prettyJSON(body, true)
-	if !ok {
-		t.Fatal("prettyJSON should accept the outer object")
-	}
-	if !strings.Contains(out, "{not really json") {
-		t.Errorf("non-JSON string starting with '{' should render literally:\n%s", out)
-	}
-	if strings.Contains(out, "expanded") {
-		t.Errorf("non-JSON string should not be marked as expanded:\n%s", out)
-	}
-}
-
-func TestPrettyJSONExpandFalseLeavesLiteralEscapes(t *testing.T) {
-	body := []byte(`{"input": "{\"command\":\"ls -la\"}"}`)
-	out, ok := prettyJSON(body, false)
-	if !ok {
-		t.Fatal("prettyJSON should accept the outer object")
-	}
-	if strings.Contains(out, "expanded") {
-		t.Errorf("expand=false must not expand embedded JSON:\n%s", out)
-	}
-	if !strings.Contains(out, `\"command\"`) {
-		t.Errorf("expand=false should leave the escaped literal intact:\n%s", out)
 	}
 }
 
 func TestColorizeJSONKeyVsStringValue(t *testing.T) {
 	// A colon after a string marks it a key; distinguish key from value coloring
 	// by structure (both render, we just verify content survives and it doesn't panic).
-	out := colorizeJSON([]byte("{\n  \"k\": \"v\"\n}"), true, 0)
+	out := colorizeJSON([]byte("{\n  \"k\": \"v\"\n}"))
 	if !strings.Contains(out, "k") || !strings.Contains(out, "v") {
 		t.Errorf("colorize dropped content: %q", out)
 	}
@@ -212,40 +86,8 @@ func TestBodyPreviewTruncates(t *testing.T) {
 	for i := range big {
 		big[i] = 'a'
 	}
-	out := bodyPreview(big, true)
+	out := bodyPreview(big)
 	if !strings.Contains(out, "20000 bytes total") {
 		t.Errorf("large body should note truncation: tail=%q", out[len(out)-40:])
-	}
-}
-
-func TestPrettyJSONLargeBodyWithManyEmbeddedStrings(t *testing.T) {
-	// Confidence check that expansion over a large, deeply-populated body
-	// (many sibling embedded-JSON strings, not deep nesting) completes and
-	// doesn't panic or corrupt content.
-	type item struct {
-		ID    int    `json:"id"`
-		Input string `json:"input"`
-	}
-	items := make([]item, 500)
-	for i := range items {
-		args, err := json.Marshal(map[string]any{"command": "ls -la", "n": i})
-		if err != nil {
-			t.Fatalf("marshal args: %v", err)
-		}
-		items[i] = item{ID: i, Input: string(args)}
-	}
-	body, err := json.Marshal(items)
-	if err != nil {
-		t.Fatalf("marshal items: %v", err)
-	}
-
-	out, ok := prettyJSON(body, true)
-	if !ok {
-		t.Fatal("prettyJSON should accept a large valid array")
-	}
-	for _, want := range []string{"command", "ls -la", "expanded"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("large body expansion missing %q", want)
-		}
 	}
 }

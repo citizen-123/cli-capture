@@ -268,6 +268,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "PAUSED: [e]dit  [f]orward  [d]rop"
 		return m, waitPause(m.feeds.Pause)
 
+	case tea.MouseMsg:
+		return m.onMouse(msg)
+
 	case tea.KeyMsg:
 		if m.showHelp {
 			return m.onHelpKey(msg)
@@ -586,9 +589,8 @@ func (m *Model) sizeEditor() {
 // the emulator, and the render call must all use it so the target draws for the
 // exact grid we display.
 func (m Model) leftSize() (cols, rows int) {
-	paneW := m.width/2 - 1
-	paneH := m.height - 3
-	return paneW - 2, paneH - 1
+	left, _ := m.paneRects()
+	return contentGrid(left)
 }
 
 func (m *Model) resizeChild() {
@@ -611,24 +613,25 @@ func (m Model) View() string {
 	if m.showHelp {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
 	}
-	paneW := m.width/2 - 1
-	paneH := m.height - 3
+	leftBox, rightBox := m.paneRects()
+	paneW, paneH := leftBox.W-2, leftBox.H-2 // content size lipgloss.Style.Width/Height expects (border comes off separately)
 
-	lw, lh := m.leftSize()
-	left := paneStyle(m.focus == focusTerminal).Width(paneW).Height(paneH).
+	lw, lh := contentGrid(leftBox)
+	leftPane := paneStyle(m.focus == focusTerminal).Width(paneW).Height(paneH).
 		Render(m.screen.Render(lw, lh))
 
-	rightContent := m.renderTraffic(paneW-2, paneH-1)
+	rw, rh := contentGrid(rightBox) // same numbers as lw, lh; kept separate for clarity
+	rightContent := m.renderTraffic(rw, rh)
 	switch {
 	case m.editing:
 		rightContent = m.renderEditor()
 	case m.viewing:
 		rightContent = m.renderDetail()
 	}
-	right := paneStyle(m.focus == focusTraffic).Width(paneW).Height(paneH).
+	rightPane := paneStyle(m.focus == focusTraffic).Width(paneW).Height(paneH).
 		Render(rightContent)
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 	bar := statusBar(m.width, m.status, m.engine.Enabled(), m.engine.InterceptResponses())
 	return body + "\n" + bar
 }
@@ -647,19 +650,14 @@ func (m Model) renderTraffic(w, h int) string {
 	b.WriteString(titleStyle.Render(header) + "\n")
 
 	// Reserve lines for the header, the optional filter line, and the paused
-	// prompt, so the scrollable list gets the remaining rows.
-	reserved := 1
-	if m.filtering || m.fi.Value() != "" {
+	// prompt, so the scrollable list gets the remaining rows. trafficRowLayout
+	// is the same accounting clickedFlowIndex uses to map a mouse click back
+	// onto a row, so the two can't drift apart.
+	filterLineShown := m.filtering || m.fi.Value() != ""
+	if filterLineShown {
 		b.WriteString(truncate(m.fi.View(), w) + "\n")
-		reserved++
 	}
-	if m.paused != nil {
-		reserved += 2
-	}
-	listRows := h - reserved
-	if listRows < 1 {
-		listRows = 1
-	}
+	_, listRows := trafficRowLayout(h, filterLineShown, m.paused != nil)
 
 	// Slide the window so the selection stays visible (the missing scroll).
 	sel := clampIndex(m.selected, len(vis))
