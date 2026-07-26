@@ -165,7 +165,7 @@ func (m Model) exportHAR() string {
 		return "har: " + err.Error()
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "capture.har")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "har: " + err.Error()
 	}
 	return "exported HAR to " + path
@@ -178,7 +178,7 @@ func (m Model) exportViewedFlow() string {
 		return "no flow in view"
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "flow-"+m.viewFlow.ID+".txt")
-	if err := os.WriteFile(path, []byte(export.FlowText(m.viewFlow)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(export.FlowText(m.viewFlow)), 0o600); err != nil {
 		return "export: " + err.Error()
 	}
 	return "wrote " + path
@@ -196,7 +196,7 @@ func (m Model) exportFlagged() string {
 		return "no flagged flows to export"
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "flagged.txt")
-	if err := os.WriteFile(path, []byte(export.FlowsText(flagged)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(export.FlowsText(flagged)), 0o600); err != nil {
 		return "export: " + err.Error()
 	}
 	return fmt.Sprintf("wrote %d flagged flows to %s", len(flagged), path)
@@ -213,7 +213,7 @@ func (m Model) exportCurlSelected() string {
 		return "curl: " + err.Error()
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "flow-"+f.ID+".curl")
-	if err := os.WriteFile(path, []byte(cmd+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(cmd+"\n"), 0o600); err != nil {
 		return "curl: " + err.Error()
 	}
 	return "wrote curl to " + path

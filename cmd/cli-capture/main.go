@@ -56,17 +56,20 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Log to a file, not the screen — the TUI owns stdout.
-	logf, _ := os.Create(filepath.Join(*confDir, "cli-capture.log"))
-	if logf != nil {
-		log.SetOutput(logf)
-		defer logf.Close()
-	}
-
 	authority, err := ca.LoadOrCreate(*confDir)
 	if err != nil {
 		fatal("ca: %v", err)
 	}
+
+	// Log to a file, not the screen — the TUI owns stdout. This has to come
+	// after ca.LoadOrCreate: that is what creates confDir, so opening the log
+	// any earlier fails on a first run and every log line lands on the TUI.
+	logf, err := os.Create(filepath.Join(*confDir, "cli-capture.log"))
+	if err != nil {
+		fatal("open log %s: %v", filepath.Join(*confDir, "cli-capture.log"), err)
+	}
+	log.SetOutput(logf)
+	defer logf.Close()
 	caFile := filepath.Join(*confDir, "ca.pem")
 
 	store := capture.NewStore()
