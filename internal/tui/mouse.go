@@ -23,12 +23,19 @@ func (r rect) contains(x, y int) bool {
 // out with (paneStyle().Width/Height, then lipgloss.JoinHorizontal). Both
 // View() and mouse hit-testing call this instead of each keeping their own
 // copy of the geometry, so they can't drift apart.
+// The two boxes must sum to EXACTLY m.width. Sizing by content and adding the
+// border afterwards (the old `m.width/2 - 1`, then +2 per pane) produced a row
+// m.width+2 wide: lipgloss puts a border column on each side of each pane, so
+// two panes cost four border columns, not two. The terminal then wrapped every
+// pane line, which pushed the layout down the screen and left mouse Y
+// coordinates pointing at rows other than the ones actually drawn.
 func (m Model) paneRects() (left, right rect) {
-	paneW := m.width/2 - 1
-	paneH := m.height - 3
-	boxW, boxH := paneW+2, paneH+2 // + lipgloss's border on every side
-	left = rect{X: 0, Y: 0, W: boxW, H: boxH}
-	right = rect{X: boxW, Y: 0, W: boxW, H: boxH}
+	boxH := m.height - 1 // the status bar owns the last row
+	leftW := m.width / 2
+	// An odd terminal width can't split evenly; give the spare column to the
+	// right pane rather than letting the pair overflow by one.
+	left = rect{X: 0, Y: 0, W: leftW, H: boxH}
+	right = rect{X: leftW, Y: 0, W: m.width - leftW, H: boxH}
 	return left, right
 }
 
@@ -154,6 +161,14 @@ func (m Model) onRightPaneMouse(ev tea.MouseMsg, box rect) (tea.Model, tea.Cmd) 
 		return m, nil // the pane is showing the editor/detail view, not the list
 	}
 	if idx, ok := m.clickedFlowIndex(row, rows); ok {
+		// First click on a row selects it; clicking the row that is already
+		// selected opens it, the same path "enter" takes. bubbletea reports no
+		// click count, so click-again is how you get open-on-click without
+		// hand-rolling double-click timing — and it keeps "just move the
+		// selection" available, which a plain open-on-first-click would lose.
+		if idx == m.selected {
+			m.openDetail()
+		}
 		m.selected = idx
 	}
 	return m, nil

@@ -640,13 +640,16 @@ func (m Model) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
 	}
 	leftBox, rightBox := m.paneRects()
-	paneW, paneH := leftBox.W-2, leftBox.H-2 // content size lipgloss.Style.Width/Height expects (border comes off separately)
+	// Each pane is sized from its OWN box: an odd terminal width makes the two
+	// boxes differ by a column, and sizing both from the left one would push
+	// the row back over m.width — the overflow paneRects exists to prevent.
+	// Width/Height take the content size; lipgloss adds the border outside it.
 
 	lw, lh := contentGrid(leftBox)
-	leftPane := paneStyle(m.focus == focusTerminal).Width(paneW).Height(paneH).
+	leftPane := paneStyle(m.focus == focusTerminal).Width(leftBox.W - 2).Height(leftBox.H - 2).
 		Render(m.screen.Render(lw, lh))
 
-	rw, rh := contentGrid(rightBox) // same numbers as lw, lh; kept separate for clarity
+	rw, rh := contentGrid(rightBox)
 	rightContent := m.renderTraffic(rw, rh)
 	switch {
 	case m.editing:
@@ -654,7 +657,7 @@ func (m Model) View() string {
 	case m.viewing:
 		rightContent = m.renderDetail()
 	}
-	rightPane := paneStyle(m.focus == focusTraffic).Width(paneW).Height(paneH).
+	rightPane := paneStyle(m.focus == focusTraffic).Width(rightBox.W - 2).Height(rightBox.H - 2).
 		Render(rightContent)
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)

@@ -40,10 +40,15 @@ func newFlows(n int) []*capture.Flow {
 // --- geometry ---
 
 // TestPaneRectsAdjoinAndMatchContentGrid pins the relationship the rest of
-// the mouse code leans on: the two panes are the same size and sit flush
-// against each other, and contentGrid(left) always agrees with leftSize() —
-// the function the PTY/emulator resize path already depended on before mouse
-// support existed.
+// the mouse code leans on: the two panes sit flush against each other, they
+// differ by at most the one column an odd terminal width cannot split, and
+// contentGrid(left) always agrees with leftSize() — the function the
+// PTY/emulator resize path already depended on before mouse support existed.
+//
+// This used to require the panes be exactly equal, which is precisely the
+// assumption that forced the layout to overflow: at an odd width equal panes
+// can only be had by rendering a column too many. Widths must sum exactly —
+// see TestPaneBoxesExactlyFillTheWidth.
 func TestPaneRectsAdjoinAndMatchContentGrid(t *testing.T) {
 	sizes := []struct{ width, height int }{
 		{100, 40}, {81, 24}, {60, 20}, {200, 60}, {40, 10},
@@ -55,9 +60,17 @@ func TestPaneRectsAdjoinAndMatchContentGrid(t *testing.T) {
 			t.Errorf("width=%d height=%d: right pane doesn't start where left ends (left=%+v right=%+v)",
 				sz.width, sz.height, left, right)
 		}
-		if left.W != right.W || left.H != right.H {
-			t.Errorf("width=%d height=%d: panes should match in size, got left=%+v right=%+v",
+		if d := left.W - right.W; d < -1 || d > 1 {
+			t.Errorf("width=%d height=%d: panes differ by %d columns, want at most 1, got left=%+v right=%+v",
+				sz.width, sz.height, d, left, right)
+		}
+		if left.H != right.H {
+			t.Errorf("width=%d height=%d: panes should match in height, got left=%+v right=%+v",
 				sz.width, sz.height, left, right)
+		}
+		if got := left.W + right.W; got != sz.width {
+			t.Errorf("width=%d: panes sum to %d, want exactly %d — anything more wraps the row",
+				sz.width, got, sz.width)
 		}
 		lw, lh := contentGrid(left)
 		wantLW, wantLH := m.leftSize()
