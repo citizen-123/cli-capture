@@ -37,10 +37,11 @@ func (t *Template) Raw() string {
 // taken as everything after the blank line — not by Content-Length — so an edit
 // that leaves a stale Content-Length still sends the bytes the user sees.
 func ParseRaw(raw string, base *Template) (*Template, error) {
-	text := normalizeCRLF(raw)
-	head, body, _ := strings.Cut(text, "\r\n\r\n")
+	head, body := splitHeadBody(raw)
 
-	lines := strings.Split(head, "\r\n")
+	// Normalize only the header block for parsing; the body is kept byte-for-byte
+	// so a multi-line body isn't silently rewritten to CRLF.
+	lines := strings.Split(strings.ReplaceAll(head, "\r\n", "\n"), "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
 		return nil, fmt.Errorf("repeater: empty request")
 	}
@@ -127,8 +128,17 @@ func hostOf(rawURL string) string {
 	return ""
 }
 
-// normalizeCRLF makes line endings CRLF regardless of what the editor produced.
-func normalizeCRLF(s string) string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	return strings.ReplaceAll(s, "\n", "\r\n")
+// splitHeadBody splits a raw request at the first blank line, tolerating LF or
+// CRLF endings, and returns the body unchanged (not re-normalized).
+func splitHeadBody(raw string) (head, body string) {
+	crlf := strings.Index(raw, "\r\n\r\n")
+	lf := strings.Index(raw, "\n\n")
+	switch {
+	case crlf < 0 && lf < 0:
+		return raw, ""
+	case crlf >= 0 && (lf < 0 || crlf <= lf):
+		return raw[:crlf], raw[crlf+4:]
+	default:
+		return raw[:lf], raw[lf+2:]
+	}
 }

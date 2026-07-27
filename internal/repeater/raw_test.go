@@ -54,6 +54,20 @@ func TestParseRawIgnoresStaleContentLength(t *testing.T) {
 	}
 }
 
+// TestParseRawPreservesMultilineBody: a body with newlines must survive
+// byte-for-byte (not be rewritten to CRLF).
+func TestParseRawPreservesMultilineBody(t *testing.T) {
+	base := &Template{URL: "http://h/x"}
+	raw := "POST /x HTTP/1.1\nHost: h\n\nline1\nline2\nline3"
+	got, err := ParseRaw(raw, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Body) != "line1\nline2\nline3" {
+		t.Errorf("body should be preserved verbatim, got %q", got.Body)
+	}
+}
+
 func TestParsePayloads(t *testing.T) {
 	m := ParsePayloads("user = alice, bob , carol\n# a comment\ntok=X\n\nempty=")
 	if len(m["user"]) != 3 || m["user"][1] != "bob" || m["user"][2] != "carol" {

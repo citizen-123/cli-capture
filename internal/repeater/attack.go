@@ -158,10 +158,3 @@ func product(lists [][]string) [][]string {
 	}
 	return result
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

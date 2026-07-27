@@ -248,6 +248,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeChild()
 		m.sizeEditor()
 		m.sizeDetail()
+		if m.repeating {
+			m.sizeRepeater()
+		}
 		return m, nil
 
 	case ptyMsg:
