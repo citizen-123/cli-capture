@@ -16,6 +16,7 @@ type helpSection struct {
 var helpSections = []helpSection{
 	{"Global — press Ctrl+A (leader), then:", []helpRow{
 		{"w", "switch pane (terminal ⇄ traffic)"},
+		{"< / >", "resize split: shrink / grow the left pane"},
 		{"i / r", "toggle intercept: requests / responses"},
 		{"s", "save session to JSON"},
 		{"h", "export session as HAR"},

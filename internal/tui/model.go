@@ -74,7 +74,8 @@ type Model struct {
 	showHelp      bool // floating help overlay
 	repeating     bool // repeater modal open
 	rep           repeaterState
-	sessionPath   string // where "save session" writes
+	splitRatio    float64 // fraction of the width given to the left (terminal) pane
+	sessionPath   string  // where "save session" writes
 	status        string
 }
 
@@ -82,6 +83,14 @@ type Model struct {
 // leader means only this one key is taken from the target — everything else in
 // the terminal pane passes through untouched.
 const leaderKey = tea.KeyCtrlA
+
+// Split resize bounds. splitStep is the per-keystroke adjustment; the ratio is
+// clamped to [minSplit, maxSplit] so neither pane can be squeezed to nothing.
+const (
+	splitStep = 0.05
+	minSplit  = 0.2
+	maxSplit  = 0.8
+)
 
 func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, screen terminal.Emulator, feeds Feeds, sessionPath string) Model {
 	return Model{
@@ -94,8 +103,9 @@ func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, 
 		ta:          newEditor(),
 		vp:          viewport.New(0, 0),
 		fi:          newFilter(),
+		splitRatio:  0.5,
 		sessionPath: sessionPath,
-		status:      "? for help · Ctrl+A w switch pane · Ctrl+A i arm intercept · Ctrl+A q quit",
+		status:      "? for help · Ctrl+A w switch pane · Ctrl+A < > resize · Ctrl+A i arm intercept · Ctrl+A q quit",
 	}
 }
 
@@ -362,7 +372,7 @@ func (m Model) onViewKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) sizeDetail() {
-	m.vp.Width = m.width/2 - 4
+	m.vp.Width = m.rightPaneWidth() - 3
 	m.vp.Height = m.height - 5
 }
 
@@ -524,6 +534,10 @@ func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = m.exportHAR()
 	case "f":
 		m.status = m.exportFlagged()
+	case "<", ",":
+		m.adjustSplit(-splitStep)
+	case ">", ".":
+		m.adjustSplit(splitStep)
 	case "?":
 		m.showHelp = !m.showHelp
 	}
@@ -598,17 +612,52 @@ func (m *Model) clearPause() {
 }
 
 func (m *Model) sizeEditor() {
-	m.ta.SetWidth(m.width/2 - 4)
+	m.ta.SetWidth(m.rightPaneWidth() - 3)
 	m.ta.SetHeight(m.height - 6)
+}
+
+// leftPaneWidth is the outer width of the left pane — the value handed to
+// lipgloss .Width(); the rounded border adds one column on each side. It is a
+// fraction of the terminal width set by splitRatio, and equals the old
+// hardcoded m.width/2 - 1 when the ratio is 0.5.
+func (m Model) leftPaneWidth() int {
+	return int(float64(m.width)*m.splitRatio) - 1
+}
+
+// rightPaneWidth is the outer width of the right pane: whatever is left after the
+// left pane and both borders. leftPaneWidth + rightPaneWidth is always m.width-2,
+// so the two panes fit side by side exactly as the even 50/50 split did.
+func (m Model) rightPaneWidth() int {
+	return m.width - 2 - m.leftPaneWidth()
 }
 
 // leftSize is the terminal grid size for the left pane's content area. The PTY,
 // the emulator, and the render call must all use it so the target draws for the
 // exact grid we display.
 func (m Model) leftSize() (cols, rows int) {
-	paneW := m.width/2 - 1
+	paneW := m.leftPaneWidth()
 	paneH := m.height - 3
 	return paneW - 2, paneH - 1
+}
+
+// adjustSplit nudges the split ratio by delta, clamped to [minSplit, maxSplit],
+// and re-sizes the target PTY/emulator and the right-pane overlays so everything
+// redraws at the new widths.
+func (m *Model) adjustSplit(delta float64) {
+	r := m.splitRatio + delta
+	if r < minSplit {
+		r = minSplit
+	}
+	if r > maxSplit {
+		r = maxSplit
+	}
+	if r == m.splitRatio {
+		return
+	}
+	m.splitRatio = r
+	m.resizeChild()
+	m.sizeEditor()
+	m.sizeDetail()
 }
 
 func (m *Model) resizeChild() {
@@ -634,21 +683,22 @@ func (m Model) View() string {
 	if m.repeating {
 		return m.repeaterView()
 	}
-	paneW := m.width/2 - 1
+	leftW := m.leftPaneWidth()
+	rightW := m.rightPaneWidth()
 	paneH := m.height - 3
 
 	lw, lh := m.leftSize()
-	left := paneStyle(m.focus == focusTerminal).Width(paneW).Height(paneH).
+	left := paneStyle(m.focus == focusTerminal).Width(leftW).Height(paneH).
 		Render(m.screen.Render(lw, lh))
 
-	rightContent := m.renderTraffic(paneW-2, paneH-1)
+	rightContent := m.renderTraffic(rightW-2, paneH-1)
 	switch {
 	case m.editing:
 		rightContent = m.renderEditor()
 	case m.viewing:
 		rightContent = m.renderDetail()
 	}
-	right := paneStyle(m.focus == focusTraffic).Width(paneW).Height(paneH).
+	right := paneStyle(m.focus == focusTraffic).Width(rightW).Height(paneH).
 		Render(rightContent)
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
