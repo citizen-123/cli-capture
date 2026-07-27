@@ -35,6 +35,7 @@ var helpSections = []helpSection{
 		{"enter", "open detail view"},
 		{"e / f / d", "PAUSED flow: edit / forward / drop"},
 		{"x", "resend the selected flow to its origin"},
+		{"R", "open in Repeater — edit, set {{variables}}, resend or attack"},
 		{"c", "export the selected flow as a curl command"},
 		{"n / N", "inject a WebSocket frame (client→server / server→client)"},
 		{"?", "toggle this help"},
@@ -48,6 +49,12 @@ var helpSections = []helpSection{
 		{"Ctrl+S", "forward / send the edited bytes"},
 		{"Ctrl+L", "fix Content-Length to match the body"},
 		{"esc", "cancel"},
+	}},
+	{"Repeater (R)", []helpRow{
+		{"Tab", "switch between request and payloads"},
+		{"Ctrl+O", "cycle attack mode: single / sniper / battering-ram / pitchfork / cluster-bomb"},
+		{"Ctrl+S", "send (single) or run the attack; results stream into the traffic list"},
+		{"esc", "close"},
 	}},
 }
 
