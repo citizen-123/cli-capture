@@ -70,8 +70,10 @@ type Model struct {
 	injectDir     capture.Direction
 	filtering     bool // true while editing the flow-list filter
 	fi            textinput.Model
-	flaggedOnly   bool   // show only flagged flows
-	showHelp      bool   // floating help overlay
+	flaggedOnly   bool // show only flagged flows
+	showHelp      bool // floating help overlay
+	repeating     bool // repeater modal open
+	rep           repeaterState
 	sessionPath   string // where "save session" writes
 	status        string
 }
@@ -266,9 +268,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "PAUSED: [e]dit  [f]orward  [d]rop"
 		return m, waitPause(m.feeds.Pause)
 
+	case repeaterResultMsg:
+		if msg.err != nil {
+			m.rep.result = "error: " + msg.err.Error()
+		} else if msg.flow != nil && msg.flow.Response != nil {
+			m.rep.result = "sent · " + msg.flow.Response.Summary
+		}
+		return m, nil
+
+	case attackDoneMsg:
+		m.rep.result = fmt.Sprintf("attack complete · %d requests sent (see traffic list)", msg.count)
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.showHelp {
 			return m.onHelpKey(msg)
+		}
+		if m.repeating {
+			return m.onRepeaterKey(msg)
 		}
 		if m.editing {
 			return m.onEditKey(msg)
@@ -421,6 +438,8 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "?":
 		m.showHelp = true
+	case "R":
+		m.openRepeater()
 	case "x":
 		m.status = m.resendSelected()
 	case "enter":
@@ -608,6 +627,9 @@ func (m Model) View() string {
 	}
 	if m.showHelp {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
+	}
+	if m.repeating {
+		return m.repeaterView()
 	}
 	paneW := m.width/2 - 1
 	paneH := m.height - 3
