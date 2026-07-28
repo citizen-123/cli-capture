@@ -31,8 +31,19 @@ import (
 	"github.com/citizen-123/cli-capture/internal/tui"
 )
 
+// Build metadata, overridden at release time via -ldflags "-X main.version=...".
+// GoReleaser populates these by default (see .goreleaser.yaml).
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	var (
+		showVersion = flag.Bool("version", false, "print version and exit")
+
+
 		listen  = flag.String("listen", "127.0.0.1:0", "proxy listen address")
 		confDir = flag.String("dir", defaultDir(), "config/CA directory")
 
@@ -50,6 +61,12 @@ func main() {
 		loadPath = flag.String("load", "", "preload a saved capture session (JSON) into the flow list")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("cli-capture %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
+
 	argv := flag.Args()
 	if len(argv) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: cli-capture [flags] -- <command> [args...]")

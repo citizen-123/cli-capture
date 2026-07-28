@@ -67,7 +67,33 @@ Use it to:
 
 ## Install
 
-Requires **Go 1.26+**. Clone and build:
+### With `go install` (recommended)
+
+Requires **Go 1.26+**. Installs the `cli-capture` binary into `$(go env GOBIN)`
+(or `$(go env GOPATH)/bin`):
+
+```bash
+go install github.com/citizen-123/cli-capture/cmd/cli-capture@latest
+```
+
+Make sure that directory is on your `PATH`, then run `cli-capture -version` to
+confirm.
+
+### Prebuilt release binaries
+
+Grab a tarball/zip for your OS and architecture from the
+[Releases page](https://github.com/citizen-123/cli-capture/releases) (linux,
+macOS, and Windows on amd64/arm64), verify it against `checksums.txt`, and drop
+the binary on your `PATH`:
+
+```bash
+# example: Linux amd64
+tar -xzf cli-capture_*_linux_amd64.tar.gz
+install -m755 cli-capture ~/.local/bin/
+cli-capture -version
+```
+
+### From source
 
 ```bash
 git clone https://github.com/citizen-123/cli-capture
