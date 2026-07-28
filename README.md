@@ -23,6 +23,14 @@ export.
  ? for help · Ctrl+A w switch pane · Ctrl+A i arm intercept · Ctrl+A q quit
 ```
 
+**📸 See the [visual tour](docs/screenshots.md)** for a screenshot of every feature,
+or the **[docs](docs/)** for the guides: [getting started](docs/getting-started.md) ·
+[keybindings](docs/keybindings.md) · [scope](docs/scope.md) ·
+[intercepting](docs/intercepting.md) · [repeater](docs/repeater.md) ·
+[exporting](docs/exporting.md).
+
+![cli-capture split-pane monitor](docs/img/01-overview-split-pane.png)
+
 ---
 
 ## What it's for
@@ -194,8 +202,8 @@ Examples:
 # intercept only GitHub's API, minus a noisy endpoint
 ./cli-capture -scope '*.github.com' -exclude 'path:/telemetry' -- gh pr list
 
-# intercept every POST that carries a token, anywhere
-./cli-capture -scope 'method:=POST' -scope 'body:token' -- some-cli
+# pause every POST, and anything carrying a token in its body
+./cli-capture -scope 'method:=POST,body:token' -- some-cli
 
 # monitor everything, but never decrypt the bank
 ./cli-capture -no-mitm '*.bank.example' -- some-cli
@@ -203,7 +211,8 @@ Examples:
 
 Postures fall out of the defaults: give `-scope` and you get an **allowlist**
 (intercept only those); give only `-exclude` and you get a **denylist**
-(intercept everything except those).
+(intercept everything except those). Specs within one flag are OR'd, and a flag
+given twice keeps only the last value — see [docs/scope.md](docs/scope.md).
 
 ---
 
