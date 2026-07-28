@@ -5,6 +5,9 @@ itself — the target needs them. It uses a **tmux-style leader**: `Ctrl+A`, the
 a command key. Everything else goes straight through to the target. Press
 `Ctrl+A` twice to send a literal `Ctrl+A`.
 
+Every binding below is a default. The leader and any key can be rebound — see
+[configuration](configuration.md#keybindings).
+
 Press **`?`** for this reference in-app:
 
 ![Help overlay](img/13-help-overlay.png)

@@ -7,6 +7,7 @@ about it — a screenshot of every feature, in order.
 |---|---|
 | [Getting started](getting-started.md) | Your first capture, what happens at launch, reading and triaging the flow list, where files land |
 | [Keybindings](keybindings.md) | Every shortcut, by context — the same reference the `?` overlay shows |
+| [Configuration](configuration.md) | Themes and keybindings: the config file, presets, and `-config` |
 | [Scope](scope.md) | The `-scope` / `-exclude` / `-mitm` / `-no-mitm` spec grammar and the postures it produces |
 | [Intercepting & tampering](intercepting.md) | Arming interception, pausing flows, editing bytes, per-protocol behavior |
 | [Repeater & attacks](repeater.md) | Resending, `{{variables}}`, payload lists, and the five attack modes |
