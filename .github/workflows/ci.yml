@@ -32,59 +32,8 @@ jobs:
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-
-          # Paths that cannot change the binary or its test results. A change
-          # set touching only these skips the build; everything else builds, so
-          # new source, tooling, or workflow files are covered without editing
-          # this list.
-          DOC_ONLY=(
-            'docs/*'
-            '*.md'
-            'LICENSE'
-            '.github/ISSUE_TEMPLATE/*'
-          )
-
-          decide() {
-            echo "$2"
-            echo "build=$1" >> "$GITHUB_OUTPUT"
-            exit 0
-          }
-
-          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
-            decide true "No base commit to diff against — building."
-          fi
-
-          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
-          fi
-          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            decide true "Base commit $BASE_SHA is unreachable — building."
-          fi
-
-          # The base branch may have moved on since the branch was cut, so diff
-          # from the merge base to consider only this branch's own changes.
-          base="$(git merge-base "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || echo "$BASE_SHA")"
-          files="$(git diff --name-only "$base" "$HEAD_SHA")"
-
-          if [ -z "$files" ]; then
-            decide false "No files changed — skipping the build."
-          fi
-
-          echo "Changed files:"
-          echo "$files" | sed 's/^/  /'
-
-          while IFS= read -r file; do
-            [ -n "$file" ] || continue
-            for pattern in "${DOC_ONLY[@]}"; do
-              # shellcheck disable=SC2053 # unquoted RHS is the glob to match
-              if [[ $file == $pattern ]]; then
-                continue 2
-              fi
-            done
-            decide true "$file requires a build."
-          done <<< "$files"
-
-          decide false "Documentation-only change — skipping the build."
+          build="$(.github/scripts/needs-build.sh "$BASE_SHA" "$HEAD_SHA")"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
 
   build-test:
     name: build-test
