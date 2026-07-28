@@ -2,3 +2,6 @@
 *.log
 # local CA / config
 /.cli-capture/
+
+# goreleaser build output
+/dist/
