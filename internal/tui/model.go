@@ -79,12 +79,26 @@ type Model struct {
 	splitRatio    float64 // fraction of the width given to the left (terminal) pane
 	sessionPath   string  // where "save session" writes
 	status        string
+	keys          KeyMap // key → action bindings; zero value means the defaults
 }
 
-// leaderKey is the tmux-style prefix: press it, then a command key. Using a
-// leader means only this one key is taken from the target — everything else in
-// the terminal pane passes through untouched.
-const leaderKey = tea.KeyCtrlA
+// WithKeys returns the model using km for dispatch and for the help overlay.
+func (m Model) WithKeys(km KeyMap) Model {
+	m.keys = km
+	return m
+}
+
+// km is the model's keymap, falling back to the defaults so a zero-value Model
+// (as used in tests) still dispatches and renders help.
+func (m Model) km() KeyMap {
+	if m.keys.binds == nil {
+		return defaultKeyMap
+	}
+	return m.keys
+}
+
+// defaultKeyMap is built once: dispatch consults it on every keystroke.
+var defaultKeyMap = DefaultKeyMap()
 
 // Split resize bounds. splitStep is the per-keystroke adjustment; the ratio is
 // clamped to [minSplit, maxSplit] so neither pane can be squeezed to nothing.
@@ -362,18 +376,12 @@ func (m Model) onFilterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // onViewKey handles keys while the detail view is open: Esc/q closes it, and
 // everything else scrolls the viewport.
 func (m Model) onViewKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.Type {
-	case tea.KeyEsc:
+	switch m.km().Action(ctxDetail, k.String()) {
+	case ActDetailClose:
 		m.viewing = false
 		m.viewFlow = nil
 		return m, nil
-	}
-	switch k.String() {
-	case "q":
-		m.viewing = false
-		m.viewFlow = nil
-		return m, nil
-	case "s":
+	case ActDetailSave:
 		m.status = m.exportViewedFlow()
 		return m, nil
 	}
@@ -404,7 +412,7 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingLeader {
 		return m.leaderCommand(k)
 	}
-	if k.Type == leaderKey {
+	if k.Type == m.km().Leader {
 		m.pendingLeader = true
 		return m, nil
 	}
@@ -419,61 +427,61 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Traffic pane. Interception toggles also live here as plain letters because
 	// this pane never forwards keystrokes to the target.
-	switch k.String() {
-	case "i":
+	switch m.km().Action(ctxTraffic, k.String()) {
+	case ActInterceptRequests:
 		m.engine.SetEnabled(!m.engine.Enabled())
-	case "r":
+	case ActInterceptResponses:
 		m.engine.SetInterceptResponses(!m.engine.InterceptResponses())
-	case "up", "k":
+	case ActFlowPrev:
 		if m.selected > 0 {
 			m.selected--
 		}
-	case "down", "j":
+	case ActFlowNext:
 		if m.selected < len(m.visible())-1 {
 			m.selected++
 		}
-	case "/":
+	case ActFilterOpen:
 		m.filtering = true
 		m.fi.Focus()
-	case " ":
+	case ActFlowFlag:
 		if f := m.selectedFlow(); f != nil {
 			f.Flagged = !f.Flagged
 		}
-	case "F":
+	case ActFlaggedOnly:
 		m.flaggedOnly = !m.flaggedOnly
 		m.selected = clampIndex(m.selected, len(m.visible()))
-	case "o":
+	case ActSortCycle:
 		m.sort = (m.sort + 1) % 3
 		m.selected = clampIndex(m.selected, len(m.visible()))
-	case "c":
+	case ActExportCurl:
 		m.status = m.exportCurlSelected()
-	case "e":
+	case ActPausedEdit:
 		if m.paused != nil {
 			m.enterEdit()
 		}
-	case "f":
+	case ActPausedFwd:
 		if m.paused != nil {
 			m.engine.Resolve(m.paused.ID, intercept.Resolution{Decision: intercept.Forward})
 			m.clearPause()
 			m.status = "forwarded"
 		}
-	case "d":
+	case ActPausedDrop:
 		if m.paused != nil {
 			m.engine.Resolve(m.paused.ID, intercept.Resolution{Decision: intercept.Drop})
 			m.clearPause()
 			m.status = "dropped"
 		}
-	case "?":
+	case ActHelpToggle:
 		m.showHelp = true
-	case "R":
+	case ActRepeaterNew:
 		m.openRepeater()
-	case "x":
+	case ActFlowResend:
 		m.status = m.resendSelected()
-	case "enter":
+	case ActDetailOpen:
 		m.openDetail()
-	case "n":
+	case ActInjectOut:
 		m.enterInject(capture.ClientToServer)
-	case "N":
+	case ActInjectIn:
 		m.enterInject(capture.ServerToClient)
 	}
 	return m, nil
@@ -522,37 +530,39 @@ func (m *Model) doInject() string {
 func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.pendingLeader = false
 
-	if k.Type == leaderKey {
+	if k.Type == m.km().Leader {
 		if m.focus == focusTerminal && m.target != nil {
-			m.target.Pty.Write([]byte{0x01}) // literal Ctrl+A
+			// KeyType 1-26 is the ASCII control code, so this is the literal
+			// leader byte whichever ctrl key is configured.
+			m.target.Pty.Write([]byte{byte(m.km().Leader)})
 		}
 		return m, nil
 	}
 
-	switch k.String() {
-	case "w":
+	switch m.km().Action(ctxLeader, k.String()) {
+	case ActPaneSwitch:
 		if m.focus == focusTerminal {
 			m.focus = focusTraffic
 		} else {
 			m.focus = focusTerminal
 		}
-	case "q":
+	case ActQuit:
 		return m, tea.Quit
-	case "i":
+	case ActInterceptRequests:
 		m.engine.SetEnabled(!m.engine.Enabled())
-	case "r":
+	case ActInterceptResponses:
 		m.engine.SetInterceptResponses(!m.engine.InterceptResponses())
-	case "s":
+	case ActSessionSave:
 		m.status = m.saveSession()
-	case "h":
+	case ActExportHAR:
 		m.status = m.exportHAR()
-	case "f":
+	case ActExportFlagged:
 		m.status = m.exportFlagged()
-	case "<", ",":
+	case ActSplitShrink:
 		m.adjustSplit(-splitStep)
-	case ">", ".":
+	case ActSplitGrow:
 		m.adjustSplit(splitStep)
-	case "?":
+	case ActHelpToggle:
 		m.showHelp = !m.showHelp
 	}
 	return m, nil
@@ -562,10 +572,11 @@ func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // edited bytes, Ctrl+L fixes the HTTP Content-Length, Esc cancels back to the
 // forward/drop prompt, and everything else is typing into the textarea.
 func (m Model) onEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.Type {
-	case tea.KeyCtrlQ:
+	if k.Type == tea.KeyCtrlQ {
 		return m, tea.Quit
-	case tea.KeyCtrlS:
+	}
+	switch m.km().Action(ctxEditor, k.String()) {
+	case ActEditorSend:
 		if m.injecting {
 			status := m.doInject()
 			m.editing = false
@@ -583,13 +594,13 @@ func (m Model) onEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "forwarded (edited)"
 		}
 		return m, nil
-	case tea.KeyCtrlL:
+	case ActEditorFixLen:
 		if !m.injecting {
 			m.ta.SetValue(fixContentLength(m.ta.Value()))
 			m.status = "fixed Content-Length"
 		}
 		return m, nil
-	case tea.KeyEsc:
+	case ActEditorCancel:
 		m.editing = false
 		m.injecting = false
 		m.ta.Blur()
