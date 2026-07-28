@@ -12,7 +12,13 @@ var (
 	flagStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // orange for flagged rows
 	keyCapStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	sectionStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+
+	// HTTP status-class colors for the flow-list status column.
+	code2xxStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // green
+	code3xxStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("14")) // cyan
+	code4xxStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
+	code5xxStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))  // red
+	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 
 	// JSON syntax highlighting for pretty-printed bodies.
 	jsonKeyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // blue

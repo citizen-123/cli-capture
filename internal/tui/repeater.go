@@ -5,21 +5,33 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 	"github.com/citizen-123/cli-capture/internal/repeater"
 )
 
+// repeaterFocus enumerates the three focusable areas of the Repeater modal.
+const (
+	repFocusReq = iota
+	repFocusPayload
+	repFocusResp
+)
+
 // repeaterState holds the Repeater modal: an editable raw request (with
-// {{markers}}), a payloads editor, and the selected attack mode.
+// {{markers}}), a payloads editor, the selected attack mode, and the last
+// response (shown inline so you don't have to leave to see the result).
 type repeaterState struct {
 	base    *repeater.Template // origin scheme/host/secure to send against
 	req     textarea.Model     // raw request, editable, may contain {{markers}}
 	payload textarea.Model     // "name = a, b, c" lines
+	respVP  viewport.Model     // last response, scrollable
+	resp    *capture.Flow      // last sent flow
 	mode    repeater.AttackMode
-	focus   int // 0 = request, 1 = payloads
+	focus   int // repFocusReq | repFocusPayload | repFocusResp
 	result  string
 }
 
@@ -49,7 +61,7 @@ func (m *Model) openRepeater() {
 	pay.SetValue(prefillPayloads(tmpl.Variables()))
 	pay.Blur()
 
-	m.rep = repeaterState{base: tmpl, req: req, payload: pay, mode: repeater.Single, focus: 0}
+	m.rep = repeaterState{base: tmpl, req: req, payload: pay, respVP: viewport.New(0, 0), mode: repeater.Single, focus: repFocusReq}
 	m.sizeRepeater()
 	m.repeating = true
 	m.status = "Repeater: Tab switch · Ctrl+O mode · Ctrl+S send · Esc close"
@@ -65,13 +77,14 @@ func (m Model) onRepeaterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.repeating = false
 		return m, nil
 	case tea.KeyTab:
-		m.rep.focus = 1 - m.rep.focus
-		if m.rep.focus == 0 {
+		m.rep.focus = (m.rep.focus + 1) % 3
+		m.rep.req.Blur()
+		m.rep.payload.Blur()
+		switch m.rep.focus {
+		case repFocusReq:
 			m.rep.req.Focus()
-			m.rep.payload.Blur()
-		} else {
+		case repFocusPayload:
 			m.rep.payload.Focus()
-			m.rep.req.Blur()
 		}
 		return m, nil
 	case tea.KeyCtrlO:
@@ -88,10 +101,13 @@ func (m Model) onRepeaterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
-	if m.rep.focus == 0 {
+	switch m.rep.focus {
+	case repFocusReq:
 		m.rep.req, cmd = m.rep.req.Update(k)
-	} else {
+	case repFocusPayload:
 		m.rep.payload, cmd = m.rep.payload.Update(k)
+	case repFocusResp:
+		m.rep.respVP, cmd = m.rep.respVP.Update(k)
 	}
 	return m, cmd
 }
@@ -140,6 +156,9 @@ func (m Model) runRepeater(tmpl *repeater.Template) tea.Cmd {
 		n := 0
 		for _, job := range jobs {
 			if flow, _ := repeater.Send(tmpl, job); flow != nil {
+				if flow.Request != nil {
+					flow.Request.Meta["payload"] = jobLabel(job, positions)
+				}
 				store.Add(flow)
 				n++
 			}
@@ -148,28 +167,52 @@ func (m Model) runRepeater(tmpl *repeater.Template) tea.Cmd {
 	}
 }
 
+// jobLabel renders the fuzzed positions of an attack job as "name=value, …" so
+// the traffic-list row for each result shows which payload produced it.
+func jobLabel(job map[string]string, positions []string) string {
+	parts := make([]string, 0, len(positions))
+	for _, p := range positions {
+		parts = append(parts, p+"="+job[p])
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (m *Model) sizeRepeater() {
 	w := m.width - 4
 	if w < 10 {
 		w = 10
 	}
-	avail := m.height - 8
-	if avail < 6 {
-		avail = 6
+	// Fixed chrome: title + 3 section labels + footer ≈ 5 lines.
+	avail := m.height - 6
+	if avail < 9 {
+		avail = 9
 	}
-	reqH := avail * 2 / 3
-	payH := avail - reqH
+	reqH := avail * 45 / 100
+	payH := avail * 20 / 100
+	if payH < 2 {
+		payH = 2
+	}
+	respH := avail - reqH - payH
+	if respH < 3 {
+		respH = 3
+	}
 	m.rep.req.SetWidth(w)
 	m.rep.req.SetHeight(reqH)
 	m.rep.payload.SetWidth(w)
 	m.rep.payload.SetHeight(payH)
+	m.rep.respVP.Width = w
+	m.rep.respVP.Height = respH
+	if m.rep.resp != nil {
+		m.rep.respVP.SetContent(renderRepeaterResponse(m.rep.resp, w))
+	}
 }
 
 func (m Model) repeaterView() string {
 	title := "Repeater ▸ " + m.rep.base.Method + " " + m.rep.base.URL
-	reqLabel := sectionStyle.Render("Request") + focusMark(m.rep.focus == 0)
+	reqLabel := sectionStyle.Render("Request") + focusMark(m.rep.focus == repFocusReq)
 	payLabel := sectionStyle.Render("Payloads") +
-		dimStyle.Render("  ["+m.rep.mode.String()+"]  name = a, b, c") + focusMark(m.rep.focus == 1)
+		dimStyle.Render("  ["+m.rep.mode.String()+"]  name = a, b, c") + focusMark(m.rep.focus == repFocusPayload)
+	respLabel := sectionStyle.Render("Response") + focusMark(m.rep.focus == repFocusResp)
 
 	footer := dimStyle.Render("Tab switch · Ctrl+O mode · Ctrl+S send · Esc close")
 	if m.rep.result != "" {
@@ -178,19 +221,29 @@ func (m Model) repeaterView() string {
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render(truncate(title, m.width-1)),
-		"",
 		reqLabel,
 		m.rep.req.View(),
 		payLabel,
 		m.rep.payload.View(),
-		"",
+		respLabel,
+		m.rep.respVP.View(),
 		footer,
 	)
 }
 
+// renderRepeaterResponse renders the last response (status, headers, decoded &
+// colored body) for the inline response pane.
+func renderRepeaterResponse(f *capture.Flow, width int) string {
+	if f == nil || f.Response == nil {
+		return dimStyle.Render("(no response yet — Ctrl+S to send)")
+	}
+	body := codeStyle(f).Render(f.Response.Summary) + "\n\n" + renderMessage(f.Response, width)
+	return ansi.Hardwrap(body, width, false)
+}
+
 func focusMark(active bool) string {
 	if active {
-		return keyCapStyle.Render(" ◀ editing")
+		return keyCapStyle.Render(" ◀")
 	}
 	return ""
 }

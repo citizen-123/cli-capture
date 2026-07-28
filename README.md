@@ -191,6 +191,7 @@ own keys — only the leader is intercepted (press it twice to send a literal
 | `j` / `k` | move selection (list scrolls to follow) |
 | `space` | flag / unflag the selected flow |
 | `F` | show flagged only |
+| `o` | cycle sort: none / status / size (surfaces attack outliers) |
 | `/` | filter by host / method / path / status |
 | `enter` | open the detail view |
 | `e` / `f` / `d` | on a **PAUSED** flow: edit / forward / drop |
@@ -198,6 +199,13 @@ own keys — only the leader is intercepted (press it twice to send a literal
 | `c` | export the selected flow as a curl command |
 | `n` / `N` | inject a WebSocket frame (client→server / server→client) |
 | `?` | toggle help |
+
+Each row shows the HTTP **status code** (colored by class) and **response size**,
+so you can triage at a glance; attack results also show the payload that produced
+them, and `o` sorts by status or size to surface the outlier.
+
+**Repeater** (`R`): the response is shown **inline** — `Tab` cycles request →
+payloads → response, `Ctrl+O` cycles attack mode, `Ctrl+S` sends.
 
 **Detail view** (`enter`): `j`/`k` scroll · `s` save this flow to `.txt` ·
 `esc`/`q` back.
