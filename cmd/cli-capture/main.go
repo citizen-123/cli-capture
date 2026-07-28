@@ -21,12 +21,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
+	"github.com/citizen-123/cli-capture/internal/config"
 	"github.com/citizen-123/cli-capture/internal/intercept"
 	"github.com/citizen-123/cli-capture/internal/proxy"
 	"github.com/citizen-123/cli-capture/internal/proxy/ca"
 	"github.com/citizen-123/cli-capture/internal/runner"
 	"github.com/citizen-123/cli-capture/internal/scope"
 	"github.com/citizen-123/cli-capture/internal/terminal"
+	"github.com/citizen-123/cli-capture/internal/theme"
 	"github.com/citizen-123/cli-capture/internal/transparent"
 	"github.com/citizen-123/cli-capture/internal/tui"
 )
@@ -43,10 +45,18 @@ func main() {
 	var (
 		showVersion = flag.Bool("version", false, "print version and exit")
 
-
 		listen  = flag.String("listen", "127.0.0.1:0", "proxy listen address")
-		confDir = flag.String("dir", defaultDir(), "config/CA directory")
+		confDir = flag.String("dir", defaultDir(), "data directory: CA, sessions, exports, log")
 
+		themeName = flag.String("theme", "", "color theme: "+strings.Join(theme.Names(), " | ")+" (default "+theme.Default+")")
+	)
+
+	// -config may be repeated and/or comma-separated; every file merges in the
+	// order given, on top of the default config.
+	var configs config.Paths
+	flag.Var(&configs, "config", "config file(s) or preset name(s) in "+config.Dir()+"; repeatable, comma-separated")
+
+	var (
 		scopeInc = flag.String("scope", "", "intercept these (comma-separated specs; default: all). Spec: [!][field:]pattern, e.g. '*.github.com', 'path:/v1/*', 'method:=POST', 'host:~^api\\.'")
 		scopeExc = flag.String("exclude", "", "never intercept these (comma-separated specs); wins over -scope")
 		lastWins = flag.Bool("last-match", false, "evaluate all rules and take the last match (default: first match wins)")
@@ -79,6 +89,35 @@ func main() {
 		log.SetOutput(logf)
 		defer logf.Close()
 	}
+
+	// User configuration: theme and keymap. Loaded before anything renders, and
+	// fatal on error — a config that half-applied would be worse than a refusal.
+	cfg, err := config.Load(configs, *confDir)
+	if err != nil {
+		fatal("%v", err)
+	}
+	log.Printf("config: %s", cfg.Describe())
+
+	if *themeName != "" {
+		cfg.Theme.Base = *themeName // the flag wins over the file
+	}
+	palette, err := theme.Resolve(cfg.Theme.Base, cfg.Theme.Colors)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if os.Getenv("NO_COLOR") != "" {
+		palette = palette.Colorless()
+		log.Printf("theme: %s (NO_COLOR set — colors stripped)", palette.Name)
+	} else {
+		log.Printf("theme: %s", palette.Name)
+	}
+	tui.ApplyTheme(palette)
+
+	keys, err := tui.NewKeyMap(cfg.Keys.Leader, cfg.Keys.Bindings)
+	if err != nil {
+		fatal("%v", err)
+	}
+	log.Printf("keys: leader %s", keys.LeaderName)
 
 	authority, err := ca.LoadOrCreate(*confDir)
 	if err != nil {
@@ -186,7 +225,7 @@ func main() {
 	go pumpPTY(target, screen, ptyCh)
 
 	feeds := tui.Feeds{Events: store.Subscribe(), Pty: ptyCh, Pause: pauseCh}
-	model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json"))
+	model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json")).WithKeys(keys)
 	prog := tea.NewProgram(model, tea.WithAltScreen())
 
 	// Quit the UI when the child exits.

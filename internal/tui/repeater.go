@@ -70,13 +70,14 @@ func (m *Model) openRepeater() {
 // onRepeaterKey drives the modal. Ctrl+S runs it, Ctrl+O cycles the attack mode,
 // Tab switches editors, Esc closes; other keys type into the focused editor.
 func (m Model) onRepeaterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.Type {
-	case tea.KeyCtrlQ:
+	if k.Type == tea.KeyCtrlQ {
 		return m, tea.Quit
-	case tea.KeyEsc:
+	}
+	switch m.km().Action(ctxRepeater, k.String()) {
+	case ActRepeaterClose:
 		m.repeating = false
 		return m, nil
-	case tea.KeyTab:
+	case ActRepeaterCycle:
 		m.rep.focus = (m.rep.focus + 1) % 3
 		m.rep.req.Blur()
 		m.rep.payload.Blur()
@@ -87,10 +88,10 @@ func (m Model) onRepeaterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rep.payload.Focus()
 		}
 		return m, nil
-	case tea.KeyCtrlO:
+	case ActRepeaterMode:
 		m.rep.mode = nextMode(m.rep.mode)
 		return m, nil
-	case tea.KeyCtrlS:
+	case ActRepeaterSend:
 		tmpl, err := repeater.ParseRaw(m.rep.req.Value(), m.rep.base)
 		if err != nil {
 			m.rep.result = "parse error: " + err.Error()
