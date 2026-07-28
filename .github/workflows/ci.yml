@@ -38,7 +38,10 @@ jobs:
   build-test:
     name: build-test
     needs: changes
-    if: needs.changes.outputs.build == 'true'
+    # Only an explicit "false" skips the build: if the detect job itself breaks,
+    # its output is empty and the build runs anyway. A broken filter must never
+    # be the reason a change merged untested.
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

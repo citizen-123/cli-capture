@@ -72,7 +72,9 @@ jobs:
 
   goreleaser:
     needs: changes
-    if: needs.changes.outputs.release == 'true'
+    # Same fail-open rule as ci.yml: only an explicit "false" skips. A tag that
+    # the filter couldn't evaluate still gets its binaries.
+    if: ${{ !cancelled() && needs.changes.outputs.release != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
