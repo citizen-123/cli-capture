@@ -67,7 +67,22 @@ Use it to:
 
 ## Install
 
-### With `go install` (recommended)
+### Homebrew (macOS / Linux)
+
+```bash
+brew install citizen-123/tap/cli-capture
+```
+
+Or tap first, then install:
+
+```bash
+brew tap citizen-123/tap
+brew install cli-capture
+```
+
+Upgrade later with `brew upgrade cli-capture`.
+
+### With `go install`
 
 Requires **Go 1.26+**. Installs the `cli-capture` binary into `$(go env GOBIN)`
 (or `$(go env GOPATH)/bin`):
