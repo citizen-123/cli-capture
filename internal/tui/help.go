@@ -32,6 +32,7 @@ var helpSections = []helpSection{
 		{"j / k", "move selection (list scrolls to follow)"},
 		{"space", "flag / unflag the selected flow"},
 		{"F", "show flagged only"},
+		{"o", "cycle sort: none / status / size (find attack outliers)"},
 		{"/", "filter by host / method / path / status"},
 		{"enter", "open detail view"},
 		{"e / f / d", "PAUSED flow: edit / forward / drop"},

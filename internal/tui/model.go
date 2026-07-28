@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -71,6 +72,7 @@ type Model struct {
 	filtering     bool // true while editing the flow-list filter
 	fi            textinput.Model
 	flaggedOnly   bool // show only flagged flows
+	sort          sortMode
 	showHelp      bool // floating help overlay
 	repeating     bool // repeater modal open
 	rep           repeaterState
@@ -124,7 +126,7 @@ func (m Model) saveSession() string {
 // flow's title, protocol, status, and server address.
 func (m Model) visible() []*capture.Flow {
 	q := strings.ToLower(strings.TrimSpace(m.fi.Value()))
-	if q == "" && !m.flaggedOnly {
+	if q == "" && !m.flaggedOnly && m.sort == sortNone {
 		return m.flows
 	}
 	out := make([]*capture.Flow, 0, len(m.flows))
@@ -142,6 +144,12 @@ func (m Model) visible() []*capture.Flow {
 			}
 		}
 		out = append(out, f)
+	}
+	switch m.sort {
+	case sortStatus:
+		sort.SliceStable(out, func(i, j int) bool { return rowCode(out[i]) < rowCode(out[j]) })
+	case sortSize:
+		sort.SliceStable(out, func(i, j int) bool { return respSize(out[i]) > respSize(out[j]) })
 	}
 	return out
 }
@@ -282,11 +290,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitPause(m.feeds.Pause)
 
 	case repeaterResultMsg:
+		m.rep.resp = msg.flow
 		if msg.err != nil {
 			m.rep.result = "error: " + msg.err.Error()
 		} else if msg.flow != nil && msg.flow.Response != nil {
 			m.rep.result = "sent · " + msg.flow.Response.Summary
 		}
+		m.rep.respVP.SetContent(renderRepeaterResponse(msg.flow, m.rep.respVP.Width))
+		m.rep.respVP.GotoTop()
 		return m, nil
 
 	case attackDoneMsg:
@@ -430,6 +441,9 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "F":
 		m.flaggedOnly = !m.flaggedOnly
+		m.selected = clampIndex(m.selected, len(m.visible()))
+	case "o":
+		m.sort = (m.sort + 1) % 3
 		m.selected = clampIndex(m.selected, len(m.visible()))
 	case "c":
 		m.status = m.exportCurlSelected()
@@ -717,6 +731,9 @@ func (m Model) renderTraffic(w, h int) string {
 	if m.flaggedOnly {
 		header += " ⚑only"
 	}
+	if m.sort != sortNone {
+		header += " ↕" + m.sort.String()
+	}
 	b.WriteString(titleStyle.Render(header) + "\n")
 
 	// Reserve lines for the header, the optional filter line, and the paused
@@ -741,21 +758,7 @@ func (m Model) renderTraffic(w, h int) string {
 		start = sel - listRows + 1
 	}
 	for i := start; i < len(vis) && i < start+listRows; i++ {
-		f := vis[i]
-		mark := " "
-		if f.Flagged {
-			mark = "⚑"
-		}
-		line := truncate(fmt.Sprintf("%s %-7s %s", mark, f.Status, f.Title()), w)
-		switch {
-		case i == sel:
-			line = selectedStyle.Render(line)
-		case f.Flagged:
-			line = flagStyle.Render(line)
-		case f.Status == capture.StatusPending:
-			line = pendingStyle.Render(line)
-		}
-		b.WriteString(line + "\n")
+		b.WriteString(m.renderFlowRow(vis[i], i == sel, w) + "\n")
 	}
 
 	if m.paused != nil {
