@@ -20,6 +20,11 @@ curl -s -X POST http://127.0.0.1:8899/api/login \
 The leader key is **`Ctrl+A`** (tmux-style). Press **`?`** any time for the help
 overlay.
 
+For the written guides behind these shots, see the [docs index](README.md):
+[getting started](getting-started.md) · [keybindings](keybindings.md) ·
+[scope](scope.md) · [intercepting](intercepting.md) · [repeater](repeater.md) ·
+[exporting](exporting.md).
+
 ---
 
 ## The split-pane monitor
