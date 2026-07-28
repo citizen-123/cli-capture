@@ -23,6 +23,10 @@ export.
  ? for help · Ctrl+A w switch pane · Ctrl+A i arm intercept · Ctrl+A q quit
 ```
 
+**📸 See the [visual tour](docs/screenshots.md)** for a screenshot of every feature.
+
+![cli-capture split-pane monitor](docs/img/01-overview-split-pane.png)
+
 ---
 
 ## What it's for
