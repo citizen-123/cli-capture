@@ -78,6 +78,7 @@ type Model struct {
 	flaggedOnly   bool // show only flagged flows
 	sort          sortMode
 	showHelp      bool // floating help overlay
+	helpScroll    int  // first visible line of the help overlay
 	repeating     bool // repeater modal open
 	rep           repeaterState
 	splitRatio    float64 // fraction of the width given to the left (terminal) pane
@@ -305,6 +306,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.paused = msg.item.Flow
 		m.pausedMsg = msg.item.Msg
 		m.focus = focusTraffic
+		// Close any open text input. A paused flow is blocking a real client and
+		// the prompt below tells the user to press e/f/d — but a focused input
+		// would swallow those as literal text, and ':f' means filter, not
+		// forward. Whatever was half-typed matters less than the held request.
+		m = m.clearMotion()
+		m.cmdline, m.filtering = false, false
+		m.ci.Blur()
+		m.ci.SetValue("")
+		m.fi.Blur()
 		m.status = "PAUSED: [e]dit  [f]orward  [d]rop"
 		return m, waitPause(m.feeds.Pause)
 
@@ -348,13 +358,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // onHelpKey handles keys while the help overlay is open: it is modal, so keys
-// don't fall through — esc/q/? close it, Ctrl+Q still quits.
+// don't fall through — esc/q/? close it, Ctrl+Q still quits. The body is far
+// taller than a terminal, so j/k/G/gg scroll it; without that the ':' command
+// section near the bottom would be unreachable.
 func (m Model) onHelpKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if k.Type == tea.KeyCtrlQ {
 		return m, tea.Quit
 	}
-	if k.Type == tea.KeyEsc || k.String() == "q" || k.String() == "?" {
+	max := m.maxHelpScroll(m.height)
+	switch {
+	case k.Type == tea.KeyEsc, k.String() == "q", k.String() == "?":
 		m.showHelp = false
+		return m, nil
+	case k.String() == "j", k.Type == tea.KeyDown:
+		m.helpScroll++
+	case k.String() == "k", k.Type == tea.KeyUp:
+		m.helpScroll--
+	case k.Type == tea.KeyPgDown, k.String() == "ctrl+f":
+		m.helpScroll += max/4 + 1
+	case k.Type == tea.KeyPgUp, k.String() == "ctrl+b":
+		m.helpScroll -= max/4 + 1
+	case k.String() == "G":
+		m.helpScroll = max
+	case k.String() == "g":
+		m.helpScroll = 0
+	}
+	if m.helpScroll > max {
+		m.helpScroll = max
+	}
+	if m.helpScroll < 0 {
+		m.helpScroll = 0
 	}
 	return m, nil
 }
@@ -417,15 +450,20 @@ func (m *Model) openDetail() {
 
 func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Leader dispatch: if the previous key was the leader, this key is a command.
+	// A half-typed motion is abandoned on the way out of the traffic pane: it
+	// belongs to that pane, and a count left pending across a leader sequence or
+	// a spell in the terminal would silently multiply some later j.
 	if m.pendingLeader {
-		return m.leaderCommand(k)
+		return m.clearMotion().leaderCommand(k)
 	}
 	if k.Type == m.km().Leader {
+		m = m.clearMotion()
 		m.pendingLeader = true
 		return m, nil
 	}
 
 	if m.focus == focusTerminal {
+		m = m.clearMotion()
 		// Forward the keystroke to the child PTY verbatim.
 		if b := keyBytes(k); b != nil && m.target != nil {
 			m.target.Pty.Write(b)
@@ -450,23 +488,29 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch key {
-		case "g": // gg → jump to top
-			if m.pendingG {
-				m.selected, m.pendingG, m.count = 0, false, 0
-			} else {
+		case "g": // gg → first flow, or row {count} — vim's 5gg is line 5
+			if !m.pendingG {
 				m.pendingG = true
+				return m, nil
 			}
-			return m, nil
-		case "G": // jump to bottom, or to line {count}
-			target := len(m.visible()) - 1
+			n := len(m.visible())
+			target := 0
 			if m.count > 0 {
-				target = clampIndex(m.count-1, len(m.visible()))
+				target = clampIndex(m.count-1, n)
+			}
+			m.selected = target
+			return m.clearMotion(), nil
+		case "G": // jump to the last flow, or to row {count}
+			n := len(m.visible())
+			target := n - 1
+			if m.count > 0 {
+				target = clampIndex(m.count-1, n)
 			}
 			if target < 0 {
 				target = 0
 			}
-			m.selected, m.pendingG, m.count = target, false, 0
-			return m, nil
+			m.selected = target
+			return m.clearMotion(), nil
 		}
 	}
 	m.pendingG = false
@@ -524,7 +568,7 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "dropped"
 		}
 	case ActHelpToggle:
-		m.showHelp = true
+		m.showHelp, m.helpScroll = true, 0
 	case ActRepeaterNew:
 		m.openRepeater()
 	case ActFlowResend:
@@ -615,7 +659,7 @@ func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ActSplitGrow:
 		m.adjustSplit(splitStep)
 	case ActHelpToggle:
-		m.showHelp = !m.showHelp
+		m.showHelp, m.helpScroll = !m.showHelp, 0
 	}
 	return m, nil
 }
@@ -755,7 +799,7 @@ func (m Model) View() string {
 	}
 	if m.showHelp {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-			clipToHeight(m.helpView(), m.height))
+			m.helpViewAt(m.height, m.helpScroll))
 	}
 	if m.repeating {
 		return m.repeaterView()
@@ -877,12 +921,19 @@ func (m Model) renderEditor() string {
 	return titleStyle.Render(m.renderEditorTitle()) + "\n" + m.ta.View()
 }
 
+// truncate bounds s to n columns, counting runes rather than bytes: slicing a
+// byte offset can land inside a multibyte rune and emit invalid UTF-8, which a
+// terminal renders as a replacement glyph.
 func truncate(s string, n int) string {
-	if n <= 0 || len(s) <= n {
+	if n <= 0 {
 		return s
 	}
-	if n <= 1 {
-		return s[:n]
+	r := []rune(s)
+	if len(r) <= n {
+		return s
 	}
-	return s[:n-1] + "…"
+	if n == 1 {
+		return string(r[:1])
+	}
+	return string(r[:n-1]) + "…"
 }

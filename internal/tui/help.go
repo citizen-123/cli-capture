@@ -1,30 +1,10 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
-
-// clipToHeight bounds a rendered block to h lines. lipgloss.Place centres but
-// does not clip, so on a short terminal an over-tall help overlay scrolls its
-// own title off the top and leaves no hint that anything is missing.
-func clipToHeight(s string, h int) string {
-	if h <= 0 {
-		return s // unknown height (tests, first frame): leave it alone
-	}
-	lines := strings.Split(s, "\n")
-	if len(lines) <= h {
-		return s
-	}
-	if h < 2 {
-		return strings.Join(lines[:h], "\n")
-	}
-	hidden := len(lines) - (h - 1)
-	return strings.Join(lines[:h-1], "\n") + "\n" +
-		dimStyle.Render(fmt.Sprintf("  … %d more lines — resize taller to see them", hidden))
-}
 
 // vimHelpHeading opens the part of the overlay that is not keymap-derived:
 // motions (prefixes and two-key sequences the keymap cannot express) and the
@@ -32,10 +12,11 @@ func clipToHeight(s string, h int) string {
 // still has a key). Tests about keymap-driven rows cut the output here.
 const vimHelpHeading = "Traffic pane — vim motions"
 
-// helpView renders the floating help box. Every row comes from the live keymap
-// rather than a second hand-maintained list, so rebinding a key updates the
-// help, and an unbound action disappears from it.
-func (m Model) helpView() string {
+// helpBody renders the help text itself, unbordered and unwindowed. Every row
+// in the key sections comes from the live keymap rather than a second
+// hand-maintained list, so rebinding a key updates the help, and an unbound
+// action disappears from it.
+func (m Model) helpBody() string {
 	km := m.km()
 
 	var b strings.Builder
@@ -75,7 +56,8 @@ func (m Model) helpView() string {
 	// entries the way every row above is — hence the hand-written section.
 	b.WriteString("\n" + sectionStyle.Render(vimHelpHeading) + "\n")
 	writeHelpRow(&b, "{count}", "repeats the next motion: 5j, 3k, 2}")
-	writeHelpRow(&b, "gg / G", "first / last flow; 12G jumps to row 12")
+	writeHelpRow(&b, "gg / G", "first / last flow")
+	writeHelpRow(&b, "{count}G", "jump to that row — 12G, and 5gg for row 5")
 	writeHelpRow(&b, "esc", "discard a half-typed count")
 
 	b.WriteString("\n" + sectionStyle.Render("Traffic pane — : commands") + "\n")
@@ -100,13 +82,76 @@ func (m Model) helpView() string {
 
 	b.WriteString("\n" + dimStyle.Render("Workflow: arm interception with "+km.LeaderName+" i (scope with -scope); matching") + "\n")
 	b.WriteString(dimStyle.Render("requests PAUSE so you can e-dit, f-orward, or d-rop them.") + "\n")
-	b.WriteString("\n" + lipgloss.NewStyle().Faint(true).Render("press ? or esc to close"))
+	return b.String()
+}
 
+// helpChrome is the number of lines frameHelp adds around the content: one
+// border and one padding row at the top and at the bottom.
+const helpChrome = 4
+
+// frameHelp puts the border and padding around a block of help content.
+func frameHelp(content string) string {
 	return lipgloss.NewStyle().
 		Border(paneBorder).
 		BorderForeground(focused).
 		Padding(1, 3).
-		Render(b.String())
+		Render(content)
+}
+
+// helpView renders the whole overlay unscrolled. Tests and any caller that does
+// not know the terminal height use this.
+func (m Model) helpView() string {
+	return frameHelp(m.helpBody() + "\n" + helpFooter(false, false))
+}
+
+// helpViewAt renders the overlay windowed to a terminal of h rows, starting at
+// line `scroll`. The body is well over 80 lines, so on any real terminal some of
+// it is off-screen — clipping alone would mean the ':' commands, which sit near
+// the bottom, could never be read. Scrolling is what makes the table that
+// documents itself actually reachable.
+func (m Model) helpViewAt(h, scroll int) string {
+	body := m.helpBody()
+	if h <= 0 {
+		return frameHelp(body + "\n" + helpFooter(false, false))
+	}
+	lines := strings.Split(body, "\n")
+	avail := h - helpChrome - 1 // -1 for the footer
+	if avail < 1 {
+		avail = 1
+	}
+	if len(lines) <= avail {
+		return frameHelp(body + "\n" + helpFooter(false, false))
+	}
+	scroll = clampIndex(scroll, len(lines)-avail+1)
+	window := lines[scroll : scroll+avail]
+	return frameHelp(strings.Join(window, "\n") + "\n" +
+		helpFooter(scroll > 0, scroll+avail < len(lines)))
+}
+
+// maxHelpScroll is the largest useful scroll offset for a terminal of h rows.
+func (m Model) maxHelpScroll(h int) int {
+	avail := h - helpChrome - 1
+	if avail < 1 {
+		avail = 1
+	}
+	n := len(strings.Split(m.helpBody(), "\n")) - avail
+	if n < 0 {
+		n = 0
+	}
+	return n
+}
+
+func helpFooter(more, below bool) string {
+	hint := "press ? or esc to close"
+	switch {
+	case more && below:
+		hint = "j / k to scroll · ↑ more above · ↓ more below · ? or esc to close"
+	case below:
+		hint = "j / k to scroll · more below ↓ · ? or esc to close"
+	case more:
+		hint = "j / k to scroll · more above ↑ · ? or esc to close"
+	}
+	return lipgloss.NewStyle().Faint(true).Render(hint)
 }
 
 func writeHelpRow(b *strings.Builder, keys, desc string) {

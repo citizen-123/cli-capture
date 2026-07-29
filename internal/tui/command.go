@@ -32,7 +32,12 @@ var commands = []command{
 	{name: "filter", aliases: []string{"f"}, args: "<query>", desc: "set the flow filter; no argument clears it",
 		run: func(m Model, arg string) (Model, tea.Cmd) {
 			m.fi.SetValue(arg)
-			m.selected = clampIndex(m.selected, len(m.visible()))
+			// Match the '/' key exactly (see onFilterKey): a selection that the
+			// new query pushes out of range goes to the FIRST match, not the
+			// last, or ':filter foo' and '/foo' would land on different rows.
+			if m.selected >= len(m.visible()) {
+				m.selected = 0
+			}
 			if arg == "" {
 				m.status = "filter cleared"
 			} else {
@@ -57,7 +62,7 @@ var commands = []command{
 			m.status = "sort: " + m.sort.String()
 			return m, nil
 		}},
-	{name: "export", args: "har|flagged", desc: "export flows (also plain :har and :flagged)",
+	{name: "export", args: "har|flagged", desc: "WRITE flows to disk: capture.har or flagged.txt",
 		run: func(m Model, arg string) (Model, tea.Cmd) {
 			switch arg {
 			case "har":
@@ -69,25 +74,50 @@ var commands = []command{
 			}
 			return m, nil
 		}},
-	{name: "har", desc: "export every flow as HAR",
+	{name: "har", desc: "export every flow as HAR (same as :export har)",
 		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.exportHAR(); return m, nil }},
-	{name: "flagged", desc: "export only the flagged flows",
-		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.exportFlagged(); return m, nil }},
+	// ':flagged' reads as the 'F' view toggle, not as a file write, so that is
+	// what it does. Writing flagged bodies — credentials and all — to disk is
+	// spelled out in full as ':export flagged'; it is too destructive to sit
+	// behind the more guessable of two near-identical names.
+	{name: "flagged", aliases: []string{"only"}, desc: "show only flagged flows (same as F)",
+		run: func(m Model, _ string) (Model, tea.Cmd) {
+			m.flaggedOnly = !m.flaggedOnly
+			m.selected = clampIndex(m.selected, len(m.visible()))
+			if m.flaggedOnly {
+				m.status = "showing flagged only"
+			} else {
+				m.status = "showing all flows"
+			}
+			return m, nil
+		}},
 	{name: "curl", aliases: []string{"y"}, desc: "copy the selected flow as a curl command",
 		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.exportCurlSelected(); return m, nil }},
 	{name: "resend", aliases: []string{"x"}, desc: "resend the selected flow",
 		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.resendSelected(); return m, nil }},
 	{name: "flag", desc: "toggle the flag on the selected flow",
 		run: func(m Model, _ string) (Model, tea.Cmd) {
-			if f := m.selectedFlow(); f != nil {
-				f.Flagged = !f.Flagged
+			f := m.selectedFlow()
+			if f == nil {
+				m.status = "nothing selected to flag"
+				return m, nil
+			}
+			f.Flagged = !f.Flagged
+			// Under 'F' (flagged-only) an unflag drops the row out of the list,
+			// so re-clamp the way the F and sort keys do. Unlike space, the ':'
+			// line has already closed, so the status is the only feedback.
+			m.selected = clampIndex(m.selected, len(m.visible()))
+			if f.Flagged {
+				m.status = "flagged " + f.Title()
+			} else {
+				m.status = "unflagged " + f.Title()
 			}
 			return m, nil
 		}},
 	{name: "w", aliases: []string{"write", "save"}, desc: "save the session",
 		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.saveSession(); return m, nil }},
 	{name: "help", aliases: []string{"h"}, desc: "this overlay",
-		run: func(m Model, _ string) (Model, tea.Cmd) { m.showHelp = true; return m, nil }},
+		run: func(m Model, _ string) (Model, tea.Cmd) { m.showHelp, m.helpScroll = true, 0; return m, nil }},
 	{name: "q", aliases: []string{"quit"}, desc: "quit",
 		run: func(m Model, _ string) (Model, tea.Cmd) { return m, tea.Quit }},
 }
@@ -107,21 +137,24 @@ func lookupCommand(name string) (command, bool) {
 	return command{}, false
 }
 
-// newCommandLine builds the single-line ':' input.
+// newCommandLine builds the single-line ':' input. The placeholder stays short
+// and ASCII on purpose: the pane truncates it to the pane width, and a long
+// styled placeholder gets cut mid-escape, bleeding its colour down the list.
+// The full list lives in the help overlay, which is where :help points.
 func newCommandLine() textinput.Model {
-	names := make([]string, len(commands))
-	for i, c := range commands {
-		names[i] = c.name
-	}
 	ti := textinput.New()
 	ti.Prompt = ":"
-	ti.Placeholder = strings.Join(names, " · ") + "   (:help)"
+	ti.Placeholder = "command - :help for the list"
 	return ti
 }
 
 // onCmdKey edits the ':' command line. Enter runs it, Esc cancels.
 func (m Model) onCmdKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.Type {
+	case tea.KeyCtrlQ:
+		// Every other modal honours ctrl+q; a text input that swallowed it would
+		// be the one place in the app where the quit key does nothing.
+		return m, tea.Quit
 	case tea.KeyEnter:
 		line := strings.TrimSpace(m.ci.Value())
 		m.cmdline = false
@@ -194,6 +227,14 @@ func hostJump(vis []*capture.Flow, from, dir, count int) int {
 		i = j
 	}
 	return i
+}
+
+// clearMotion discards a half-typed motion — a numeric prefix or a lone 'g'
+// waiting for its pair. Anything that takes focus away from the traffic list
+// calls this, so a stale count can never attach itself to a later keystroke.
+func (m Model) clearMotion() Model {
+	m.count, m.pendingG = 0, false
+	return m
 }
 
 // digit reports the value of a single 0-9 keystroke, for the vim-style numeric

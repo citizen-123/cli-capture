@@ -31,8 +31,8 @@ Every key is optional — a file may set only what it changes.
     "leader": "ctrl+b",
     "bindings": {
       "traffic": {
-        "g": "flow.prev",
-        "G": "flow.next",
+        "p": "flow.prev",
+        "n": "flow.next",
         "x": "none"
       }
     }
@@ -177,22 +177,28 @@ Two things are rejected rather than silently ignored: an action bound in a
 context that doesn't have it, and binding the leader key inside another context
 (the leader is consumed first, so that binding could never fire).
 
-### Example: vim-ish list movement
+### Example: rebinding list movement
 
 ```json
 {
   "keys": {
     "bindings": {
       "traffic": {
-        "g": "flow.prev",
-        "G": "flow.next",
-        "/": "flow.filter",
-        "n": "none"
+        "p": "flow.prev",
+        "n": "flow.next",
+        "/": "flow.filter"
       }
     }
   }
 }
 ```
+
+> **Don't bind `g` or `G` in the `traffic` context.** The motion layer only sees
+> keys the keymap has not claimed, so binding either one silently disables `gg`,
+> `G`, and `{count}G` — and the help overlay will still advertise them, because
+> that section isn't keymap-derived. Digits `0`–`9` are the same: bind one and
+> counted motions like `5j` stop working. See
+> [keybindings](keybindings.md#vim-style-motions).
 
 ## Where a setting came from
 

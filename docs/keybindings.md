@@ -64,11 +64,13 @@ they are ordinary bindings and can be rebound like any other.)
 |---|---|
 | `{count}` | repeat the next motion — `5j`, `3k`, `2}` |
 | `gg` / `G` | first / last flow |
-| `{count}G` | jump to that row — `12G` |
+| `{count}G`, `{count}gg` | jump to that row — `12G`, `5gg` |
 | `esc` | discard a half-typed count |
 
 A pending count (or a lone `g` waiting for its pair) shows in the traffic pane
-header, so a half-typed motion is never invisible.
+header, so a half-typed motion is never invisible. It is discarded whenever
+focus leaves the list — the leader key, the terminal pane, or `esc` — so a count
+you started and abandoned can never attach itself to a later keystroke.
 
 ## The `:` command line
 
@@ -80,7 +82,9 @@ not deserve a keybinding, and every command calls the same code as its key, so
 |---|---|
 | `:filter <query>` | set the flow filter; no argument clears it |
 | `:sort none\|status\|size` | sort the list |
-| `:export har\|flagged` | export flows (also plain `:har` / `:flagged`) |
+| `:export har\|flagged` | **write flows to disk** — `capture.har` or `flagged.txt` |
+| `:har` | shorthand for `:export har` |
+| `:flagged` | show only flagged flows, same as `F` (`:only`) |
 | `:curl` | copy the selected flow as a curl command |
 | `:resend` | resend the selected flow |
 | `:flag` | toggle the flag on the selected flow |
@@ -88,9 +92,31 @@ not deserve a keybinding, and every command calls the same code as its key, so
 | `:help` | open the help overlay |
 | `:q` | quit (`:quit`) |
 
-`:filter` and `f`, `:curl` and `y`, `:resend` and `x`, `:help` and `h` are
-aliases. `enter` runs the command, `esc` cancels. Unknown commands report in the
-status bar rather than silently doing nothing.
+Each command has a short form, typed after the `:` — these are abbreviations of
+the *command*, not references to pane keys, and several deliberately differ from
+the key that does the same job:
+
+| Short | Full |
+|---|---|
+| `:f` | `:filter` |
+| `:y` | `:curl` |
+| `:x` | `:resend` |
+| `:h` | `:help` |
+| `:write`, `:save` | `:w` |
+| `:quit` | `:q` |
+
+> Do not read those as pane keys. In the traffic pane `f` **forwards a PAUSED
+> flow** to its origin, `h` under the leader exports HAR, and `y` is unbound.
+> `:f` and `f` do different things.
+
+`enter` runs the command, `esc` cancels, `ctrl+q` quits from the command line as
+it does everywhere else. Unknown commands report in the status bar rather than
+silently doing nothing.
+
+`:flagged` toggles the *view*, matching the plain-English reading and the `F`
+key. Writing flagged request and response bodies to `flagged.txt` — credentials
+included — is spelled out in full as `:export flagged`, so the destructive one is
+never the shorter thing to type.
 
 Commands stay available even when the equivalent key has been unbound in
 [configuration](configuration.md) — that is the point of having a command line.

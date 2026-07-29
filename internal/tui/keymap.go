@@ -111,7 +111,7 @@ var defaults = map[string][]binding{
 		{ActFlaggedOnly, []string{"F"}, "show flagged only"},
 		{ActSortCycle, []string{"o"}, "cycle sort: none / status / size"},
 		{ActFilterOpen, []string{"/"}, "filter by host / method / path / status"},
-		{ActCommand, []string{":"}, "command line — :filter :sort :har :flagged :curl :w :q"},
+		{ActCommand, []string{":"}, "command line — run :help for the full list"},
 		{ActHostNext, []string{"}"}, "jump to the next flow from a different host"},
 		{ActHostPrev, []string{"{"}, "jump back to the previous host"},
 		{ActDetailOpen, []string{"enter"}, "open detail view"},

@@ -225,6 +225,112 @@ func TestCountCancelledByEsc(t *testing.T) {
 	}
 }
 
+// A count belongs to the traffic list. If it survived a leader sequence or a
+// spell in the terminal pane it would silently multiply some much later motion.
+func TestCountDiscardedWhenFocusLeavesTheList(t *testing.T) {
+	t.Run("leader sequence", func(t *testing.T) {
+		m := modelWithFlows(10)
+		m = press(t, m, "5")
+		next, _ := m.onKey(tea.KeyMsg{Type: m.km().Leader})
+		m = next.(Model)
+		if m.count != 0 {
+			t.Fatalf("count survived the leader key: %d", m.count)
+		}
+		m.pendingLeader = false
+		if m = press(t, m, "j"); m.selected != 1 {
+			t.Errorf("selected = %d after a discarded count, want 1", m.selected)
+		}
+	})
+
+	t.Run("terminal pane", func(t *testing.T) {
+		m := modelWithFlows(10)
+		m = press(t, m, "5")
+		m.focus = focusTerminal
+		next, _ := m.onKey(key("a")) // typed at the target, not the list
+		m = next.(Model)
+		if m.count != 0 {
+			t.Fatalf("count survived time in the terminal pane: %d", m.count)
+		}
+		m.focus = focusTraffic
+		if m = press(t, m, "j"); m.selected != 1 {
+			t.Errorf("selected = %d after a discarded count, want 1", m.selected)
+		}
+	})
+
+	t.Run("lone g", func(t *testing.T) {
+		m := modelWithFlows(10)
+		m.selected = 4
+		m = press(t, m, "g")
+		if !m.pendingG {
+			t.Fatal("g did not arm")
+		}
+		next, _ := m.onKey(tea.KeyMsg{Type: m.km().Leader})
+		m = next.(Model)
+		m.pendingLeader = false
+		if m.pendingG {
+			t.Fatal("a lone g survived the leader key")
+		}
+		// The next g must arm afresh rather than completing a stale gg.
+		if m = press(t, m, "g"); m.selected != 4 {
+			t.Errorf("a stale g completed a gg: selected = %d, want 4", m.selected)
+		}
+	})
+}
+
+func TestCountedGotoFirstRow(t *testing.T) {
+	m := modelWithFlows(10)
+	m.selected = 7
+	if m = press(t, m, "5", "g", "g"); m.selected != 4 { // vim: 5gg is row 5
+		t.Errorf("5gg: selected = %d, want 4", m.selected)
+	}
+	if m = press(t, m, "g", "g"); m.selected != 0 {
+		t.Errorf("bare gg: selected = %d, want 0", m.selected)
+	}
+}
+
+// ':filter' and '/' must resolve an out-of-range selection identically, or the
+// documented equivalence between a command and its key is a lie.
+func TestFilterCommandMatchesTheFilterKey(t *testing.T) {
+	m := modelWithHosts("a", "a", "b", "b", "b")
+	m.selected = 4
+
+	viaCmd, _ := m.runCommand("filter a")
+	viaKey := m
+	viaKey.fi.SetValue("a")
+	next, _ := viaKey.onFilterKey(key("a"))
+	viaKey = next.(Model)
+
+	if got, want := viaCmd.(Model).selected, viaKey.selected; got != want {
+		t.Errorf(":filter left selected=%d but / left selected=%d", got, want)
+	}
+}
+
+func TestCommandLineQuitsOnCtrlQ(t *testing.T) {
+	m := modelWithFlows(1)
+	m.cmdline = true
+	_, cmd := m.onCmdKey(tea.KeyMsg{Type: tea.KeyCtrlQ})
+	if cmd == nil {
+		t.Fatal("ctrl+q in the command line did nothing")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("ctrl+q in the command line did not quit")
+	}
+}
+
+// ':flagged' is the view toggle, not the file write — the destructive one is
+// spelled ':export flagged' so it is never the shorter thing to type.
+func TestFlaggedCommandTogglesTheViewRatherThanWriting(t *testing.T) {
+	m := modelWithFlows(3)
+	next, _ := m.runCommand("flagged")
+	m = next.(Model)
+	if !m.flaggedOnly {
+		t.Error(":flagged did not toggle the flagged-only view")
+	}
+	if !strings.Contains(m.status, "flagged only") {
+		t.Errorf("status = %q, want it to report the view change", m.status)
+	}
+}
+
 func TestOpenCommandLine(t *testing.T) {
 	m := modelWithFlows(1)
 	m = press(t, m, ":")
