@@ -9,6 +9,29 @@ import (
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
 
+func TestFlagMarkStaysOneCell(t *testing.T) {
+	// The flag glyph is themeable, including to an empty string ("remove it").
+	// The marker column must stay one cell wide either way, or flagged rows
+	// misalign against unflagged ones.
+	saved := glyphFlag
+	t.Cleanup(func() { glyphFlag = saved })
+
+	if w := ansi.StringWidth(flagMark(false)); w != 1 {
+		t.Errorf("unflagged mark width = %d, want 1", w)
+	}
+	for _, g := range []string{"⚑", "", "*"} {
+		glyphFlag = g
+		if w := ansi.StringWidth(flagMark(true)); w != 1 {
+			t.Errorf("flag glyph %q: mark width = %d, want 1", g, w)
+		}
+	}
+	// An emptied glyph makes flagged and unflagged rows share the same marker.
+	glyphFlag = ""
+	if flagMark(true) != flagMark(false) {
+		t.Error("empty flag glyph should collapse to the same one-cell blank")
+	}
+}
+
 func flowWithResp(status string, bodyLen int) *capture.Flow {
 	f := capture.NewFlow("c", "api.example.com:443")
 	f.Protocol = capture.ProtoHTTP1

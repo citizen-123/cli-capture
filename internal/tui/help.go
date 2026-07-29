@@ -15,7 +15,8 @@ func (m Model) helpView() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("cli-capture — keyboard shortcuts") + "\n\n")
 
-	for i, ctx := range contexts {
+	wrote := false
+	for _, ctx := range contexts {
 		rows := make([][2]string, 0, len(defaults[ctx]))
 		for _, bind := range defaults[ctx] {
 			keys := km.keysFor(ctx, bind.action)
@@ -28,9 +29,12 @@ func (m Model) helpView() string {
 			continue
 		}
 
-		if i > 0 {
+		// Space before every section except the first one actually rendered, so
+		// a fully-unbound leading context doesn't open the overlay with a blank.
+		if wrote {
 			b.WriteString("\n")
 		}
+		wrote = true
 		head := contextTitle[ctx]
 		if ctx == ctxLeader {
 			head = "Global — press " + km.LeaderName + " (leader), then:"

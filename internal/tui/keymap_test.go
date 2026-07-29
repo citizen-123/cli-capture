@@ -81,7 +81,10 @@ func TestNewKeyMapRejectsBadConfig(t *testing.T) {
 		wantIn    string
 	}{
 		{"unknown context", "", map[string]map[string]string{"trafic": {"j": "flow.next"}}, "unknown context"},
-		{"unknown action", "", map[string]map[string]string{ctxTraffic: {"j": "flow.nxt"}}, "unknown action"},
+		{"unknown action", "", map[string]map[string]string{ctxTraffic: {"j": "flow.nxt"}}, "not available in this context"},
+		// A real action, but in a context whose dispatch never handles it: the
+		// traffic pane has no session.save, so binding it there can't fire.
+		{"action wrong context", "", map[string]map[string]string{ctxTraffic: {"z": "session.save"}}, "not available in this context"},
 		{"leader not a ctrl key", "x", nil, "must be a ctrl key"},
 		{"leader is tab", "tab", nil, "must be a ctrl key"},
 		// Binding the leader inside another context can never fire, because the
@@ -113,10 +116,13 @@ func TestEveryDefaultActionIsAKnownAction(t *testing.T) {
 			}
 		}
 	}
-	// A config file naming any advertised action must be accepted.
-	for _, a := range knownActions() {
-		if _, err := NewKeyMap("", map[string]map[string]string{ctxTraffic: {"Q": a}}); err != nil {
-			t.Errorf("advertised action %q rejected: %v", a, err)
+	// Each advertised action must be bindable in the context that dispatches it
+	// (validation is per context, so it's only accepted where it can fire).
+	for ctx, binds := range defaults {
+		for _, b := range binds {
+			if _, err := NewKeyMap("", map[string]map[string]string{ctx: {"Q": string(b.action)}}); err != nil {
+				t.Errorf("%s: advertised action %q rejected in its own context: %v", ctx, b.action, err)
+			}
 		}
 	}
 }

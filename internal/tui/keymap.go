@@ -157,6 +157,31 @@ func knownActions() []string {
 	return out
 }
 
+// actionInContext reports whether ctx's dispatch handles a — i.e. a appears in
+// that context's defaults. Unbind is handled by the caller.
+func actionInContext(ctx string, a Action) bool {
+	for _, b := range defaults[ctx] {
+		if b.action == a {
+			return true
+		}
+	}
+	return false
+}
+
+// contextActions lists the actions bindable in ctx, sorted, for error messages.
+func contextActions(ctx string) []string {
+	seen := map[Action]bool{}
+	var out []string
+	for _, b := range defaults[ctx] {
+		if !seen[b.action] {
+			seen[b.action] = true
+			out = append(out, string(b.action))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // DefaultLeader is the tmux-style prefix: press it, then a command key. Using a
 // leader means only this one key is taken from the target — everything else in
 // the terminal pane passes through untouched.
@@ -216,11 +241,6 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 		}
 	}
 
-	valid := map[Action]bool{Unbind: true}
-	for _, a := range knownActions() {
-		valid[Action(a)] = true
-	}
-
 	for _, ctx := range sortedMapKeys(overrides) {
 		if _, ok := km.binds[ctx]; !ok {
 			return KeyMap{}, fmt.Errorf("keys: unknown context %q (have %v)", ctx, contexts)
@@ -228,8 +248,12 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 		binds := overrides[ctx]
 		for _, key := range sortedMapKeys(binds) {
 			action := Action(binds[key])
-			if !valid[action] {
-				return KeyMap{}, fmt.Errorf("keys: %s: unknown action %q (have %v)", ctx, action, knownActions())
+			// Validate per context, not against the global action set: an action
+			// only dispatches in the contexts whose handler knows it, so
+			// accepting it elsewhere would store a binding that can never fire —
+			// the silent no-op the config layer promises to reject.
+			if action != Unbind && !actionInContext(ctx, action) {
+				return KeyMap{}, fmt.Errorf("keys: %s: action %q is not available in this context (have %v)", ctx, action, contextActions(ctx))
 			}
 			// A key that the leader swallows would never reach this context,
 			// so binding it there is a silent no-op — say so instead.
@@ -258,7 +282,7 @@ func sortedMapKeys[V any](m map[string]V) []string {
 // Action returns the action bound to key in ctx, or "" if the key is unbound.
 func (k KeyMap) Action(ctx, key string) Action {
 	if k.binds == nil {
-		return DefaultKeyMap().Action(ctx, key)
+		return defaultKeyMap.Action(ctx, key) // cached; do not rebuild per keystroke
 	}
 	return k.binds[ctx][key]
 }

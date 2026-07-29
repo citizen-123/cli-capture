@@ -125,13 +125,21 @@ func rowTitle(f *capture.Flow) string {
 	return t
 }
 
+// flagMark returns the one-cell marker for a row. The flag glyph is themeable
+// and may be emptied ("remove the marker") — falling back to a space keeps the
+// column, so flagged rows stay aligned with unflagged ones instead of shifting
+// left. A themed glyph is expected to be a single-width marker.
+func flagMark(flagged bool) string {
+	if !flagged || glyphFlag == "" {
+		return " "
+	}
+	return glyphFlag
+}
+
 // renderFlowRow formats one traffic-list row: flag mark, colored status code,
 // title (+ payload), and response size.
 func (m Model) renderFlowRow(f *capture.Flow, selected bool, w int) string {
-	mark := " "
-	if f.Flagged {
-		mark = glyphFlag
-	}
+	mark := flagMark(f.Flagged)
 	code := fmt.Sprintf("%-4s", codeText(f))
 	title := rowTitle(f)
 	size := humanSize(respSize(f))
