@@ -70,13 +70,13 @@ func (m *Model) openRepeater() {
 // onRepeaterKey drives the modal. Ctrl+S runs it, Ctrl+O cycles the attack mode,
 // Tab switches editors, Esc closes; other keys type into the focused editor.
 func (m Model) onRepeaterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.Type {
-	case tea.KeyCtrlQ:
+	switch m.km().Action(ctxRepeater, k.String()) {
+	case ActQuit:
 		return m, tea.Quit
-	case tea.KeyEsc:
+	case ActRepeaterClose:
 		m.repeating = false
 		return m, nil
-	case tea.KeyTab:
+	case ActRepeaterCycle:
 		m.rep.focus = (m.rep.focus + 1) % 3
 		m.rep.req.Blur()
 		m.rep.payload.Blur()
@@ -87,10 +87,10 @@ func (m Model) onRepeaterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rep.payload.Focus()
 		}
 		return m, nil
-	case tea.KeyCtrlO:
+	case ActRepeaterMode:
 		m.rep.mode = nextMode(m.rep.mode)
 		return m, nil
-	case tea.KeyCtrlS:
+	case ActRepeaterSend:
 		tmpl, err := repeater.ParseRaw(m.rep.req.Value(), m.rep.base)
 		if err != nil {
 			m.rep.result = "parse error: " + err.Error()
@@ -208,7 +208,7 @@ func (m *Model) sizeRepeater() {
 }
 
 func (m Model) repeaterView() string {
-	title := "Repeater ▸ " + m.rep.base.Method + " " + m.rep.base.URL
+	title := "Repeater " + glyphArrow + " " + m.rep.base.Method + " " + m.rep.base.URL
 	reqLabel := sectionStyle.Render("Request") + focusMark(m.rep.focus == repFocusReq)
 	payLabel := sectionStyle.Render("Payloads") +
 		dimStyle.Render("  ["+m.rep.mode.String()+"]  name = a, b, c") + focusMark(m.rep.focus == repFocusPayload)

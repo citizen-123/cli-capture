@@ -174,7 +174,9 @@ Everything after `--` is the target program to launch and monitor.
 | Flag | Default | Description |
 |---|---|---|
 | `-listen <addr>` | `127.0.0.1:0` | Proxy listen address. `:0` picks a free port. |
-| `-dir <path>` | `~/.cli-capture` | Config / CA directory (also where sessions and exports are written). |
+| `-dir <path>` | `~/.cli-capture` | Data directory: CA, sessions, exports, log. |
+| `-config <files>` | `~/.config/cli-capture/config.json` | Config file(s) or preset name(s); repeatable and comma-separated, merged in order. See [docs/configuration.md](docs/configuration.md). |
+| `-theme <name>` | `dark` | `dark`, `light`, `high-contrast`, or `none`. Overrides the config file. |
 | `-scope <specs>` | *(all)* | Comma-separated specs for **which flows to intercept**. Default intercepts everything (once armed). |
 | `-exclude <specs>` | — | Comma-separated specs to **never** intercept; wins over `-scope`. |
 | `-last-match` | off | Evaluate all scope rules and take the last match instead of the first. |
@@ -220,7 +222,9 @@ given twice keeps only the last value — see [docs/scope.md](docs/scope.md).
 
 Keys use a **tmux-style leader (`Ctrl+A`)** so the terminal pane keeps all of its
 own keys — only the leader is intercepted (press it twice to send a literal
-`Ctrl+A` to the target). Press **`?`** for the in-app help overlay.
+`Ctrl+A` to the target). Press **`?`** for the in-app help overlay. The leader
+and every binding below are configurable — see
+[docs/configuration.md](docs/configuration.md).
 
 **Global — `Ctrl+A` then:**
 
