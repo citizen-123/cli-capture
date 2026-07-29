@@ -101,7 +101,7 @@ func main() {
 	if *themeName != "" {
 		cfg.Theme.Base = *themeName // the flag wins over the file
 	}
-	palette, err := theme.Resolve(cfg.Theme.Base, cfg.Theme.Colors)
+	palette, err := theme.Resolve(cfg.Theme.Base, cfg.Theme.Colors, cfg.Theme.Glyphs, cfg.Theme.Border)
 	if err != nil {
 		fatal("%v", err)
 	}

@@ -114,6 +114,31 @@ one plain".
 | `statusbar.mode` | the `monitor` / `req:on` chip |
 | `statusbar.text` | the message beside it |
 
+### Glyphs and border
+
+Terminal font coverage varies, so the marker glyphs and the pane border are
+themeable too — swap the default `⚑`/`▶`/`▸` for characters your font actually
+draws (an empty string removes the glyph entirely):
+
+```json
+{
+  "theme": {
+    "glyphs": { "flag": "*", "pointer": ">", "arrow": "-" },
+    "border": "normal"
+  }
+}
+```
+
+| `glyphs` key | Default | Where it's drawn |
+|---|---|---|
+| `flag` | `⚑` | the marker on flagged rows |
+| `pointer` | `▶` | the PAUSED-flow / editor pointer |
+| `arrow` | `▸` | the detail and Repeater title arrow |
+
+`border` selects the pane and overlay border style: `rounded` (default),
+`normal`, `thick`, `double`, or `hidden`. Glyphs and the border survive
+`NO_COLOR` — it strips colors, not your chosen characters.
+
 ## Keybindings
 
 `"leader"` sets the prefix key. It must be a ctrl key — `ctrl+a` through

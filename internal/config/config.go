@@ -34,11 +34,14 @@ type Config struct {
 	Keys  KeysSection  `json:"keys"`
 }
 
-// ThemeSection selects a built-in palette and overrides individual colors on
-// top of it. Color names are validated by the theme package, not here.
+// ThemeSection selects a built-in palette and overrides individual colors,
+// glyphs, and the border style on top of it. Names and values are validated by
+// the theme package, not here.
 type ThemeSection struct {
 	Base   string            `json:"base"`
 	Colors map[string]string `json:"colors"`
+	Glyphs map[string]string `json:"glyphs"`
+	Border string            `json:"border"`
 }
 
 // KeysSection sets the leader key and rebinds keys per context. Action names
@@ -148,6 +151,15 @@ func (c *Config) Merge(other Config) {
 			c.Theme.Colors = map[string]string{}
 		}
 		c.Theme.Colors[name] = v
+	}
+	for name, v := range other.Theme.Glyphs {
+		if c.Theme.Glyphs == nil {
+			c.Theme.Glyphs = map[string]string{}
+		}
+		c.Theme.Glyphs[name] = v
+	}
+	if other.Theme.Border != "" {
+		c.Theme.Border = other.Theme.Border
 	}
 	if other.Keys.Leader != "" {
 		c.Keys.Leader = other.Keys.Leader

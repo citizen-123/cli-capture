@@ -129,12 +129,14 @@ var defaults = map[string][]binding{
 		{ActEditorSend, []string{"ctrl+s"}, "forward / send the edited bytes"},
 		{ActEditorFixLen, []string{"ctrl+l"}, "fix Content-Length to match the body"},
 		{ActEditorCancel, []string{"esc"}, "cancel"},
+		{ActQuit, []string{"ctrl+q"}, "quit"},
 	},
 	ctxRepeater: {
 		{ActRepeaterCycle, []string{"tab"}, "cycle focus: request → payloads → response"},
 		{ActRepeaterMode, []string{"ctrl+o"}, "cycle attack mode: single / sniper / battering-ram / pitchfork / cluster-bomb"},
 		{ActRepeaterSend, []string{"ctrl+s"}, "send (single) or run the attack; results stream into the traffic list"},
 		{ActRepeaterClose, []string{"esc"}, "close"},
+		{ActQuit, []string{"ctrl+q"}, "quit"},
 	},
 }
 

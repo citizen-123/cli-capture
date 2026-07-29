@@ -50,8 +50,8 @@ func (m Model) helpView() string {
 	b.WriteString("\n" + lipgloss.NewStyle().Faint(true).Render("press ? or esc to close"))
 
 	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("13")).
+		Border(paneBorder).
+		BorderForeground(focused).
 		Padding(1, 3).
 		Render(b.String())
 }

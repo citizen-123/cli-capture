@@ -37,6 +37,21 @@ var (
 	// Status bar: the mode chip and the message beside it.
 	statusModeStyle lipgloss.Style
 	statusTextStyle lipgloss.Style
+
+	// Glyphs and the pane border, resolved from the theme. Render helpers read
+	// these instead of hardcoding the marker/pointer/arrow characters, so a
+	// theme can swap them for whatever the terminal's font actually covers.
+	glyphFlag    string
+	glyphPointer string
+	glyphArrow   string
+	paneBorder   lipgloss.Border
+)
+
+// Built-in glyph defaults, used when the theme leaves a glyph unset.
+const (
+	defFlagGlyph    = "⚑"
+	defPointerGlyph = "▶"
+	defArrowGlyph   = "▸"
 )
 
 func init() {
@@ -89,6 +104,37 @@ func ApplyTheme(t theme.Theme) {
 
 	statusModeStyle = fg(t.StatusMode).Bold(true)
 	statusTextStyle = fg(t.StatusText)
+
+	glyphFlag = glyphOr(t.FlagGlyph, defFlagGlyph)
+	glyphPointer = glyphOr(t.PointerGlyph, defPointerGlyph)
+	glyphArrow = glyphOr(t.ArrowGlyph, defArrowGlyph)
+	paneBorder = borderFor(t.Border)
+}
+
+// glyphOr returns v, or the default when the theme leaves the glyph unset.
+func glyphOr(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+// borderFor maps a theme border name to a lipgloss border. An empty or unknown
+// name falls back to rounded (config validation rejects unknown names, so an
+// unknown one here means the default init before a theme is applied).
+func borderFor(name string) lipgloss.Border {
+	switch name {
+	case "normal":
+		return lipgloss.NormalBorder()
+	case "thick":
+		return lipgloss.ThickBorder()
+	case "double":
+		return lipgloss.DoubleBorder()
+	case "hidden":
+		return lipgloss.HiddenBorder()
+	default:
+		return lipgloss.RoundedBorder()
+	}
 }
 
 func paneStyle(active bool) lipgloss.Style {
@@ -96,7 +142,7 @@ func paneStyle(active bool) lipgloss.Style {
 	if active {
 		c = focused
 	}
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(c)
+	return lipgloss.NewStyle().Border(paneBorder).BorderForeground(c)
 }
 
 func statusBar(width int, msg string, reqOn, respOn bool) string {

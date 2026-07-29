@@ -48,6 +48,20 @@ type Theme struct {
 	// Status bar: the mode chip and the message text beside it.
 	StatusMode string
 	StatusText string
+
+	// Glyphs are the short strings the UI draws for the flagged-row marker, the
+	// paused/edit pointer, and the detail/repeater title arrow. Terminal font
+	// coverage varies, so these are themeable alongside the colors. Empty means
+	// "use the built-in default" — the rendering layer supplies it, the same way
+	// an empty color means "no color". Kept apart from the palette so NO_COLOR
+	// strips colors without touching glyphs.
+	FlagGlyph    string
+	PointerGlyph string
+	ArrowGlyph   string
+
+	// Border is the pane/overlay border style, one of Borders(). Empty means the
+	// default (rounded).
+	Border string
 }
 
 // field returns a pointer to the named color field, or nil if the name is not
@@ -107,6 +121,32 @@ func Fields() []string {
 	sort.Strings(names)
 	return names
 }
+
+// glyphField returns a pointer to the named glyph field, or nil if unknown.
+// These are the keys users write in the `glyphs` config section.
+func (t *Theme) glyphField(name string) *string {
+	switch name {
+	case "flag":
+		return &t.FlagGlyph
+	case "pointer":
+		return &t.PointerGlyph
+	case "arrow":
+		return &t.ArrowGlyph
+	}
+	return nil
+}
+
+// GlyphFields lists every settable glyph name, sorted, for errors and docs.
+func GlyphFields() []string { return []string{"arrow", "flag", "pointer"} }
+
+// borders is the set of accepted pane border styles. Empty means the default.
+var borders = map[string]bool{
+	"": true, "rounded": true, "normal": true, "thick": true,
+	"double": true, "hidden": true,
+}
+
+// Borders lists the selectable border styles, sorted, for errors and docs.
+func Borders() []string { return []string{"double", "hidden", "normal", "rounded", "thick"} }
 
 var builtins = map[string]Theme{
 	// The original palette: 256-color indices chosen for a dark terminal.
@@ -175,7 +215,7 @@ func validColor(v string) bool {
 // empty base means the default theme. Unknown field names and malformed colors
 // are errors — a config file that doesn't do what it says is worse than one
 // that refuses to load.
-func Resolve(base string, colors map[string]string) (Theme, error) {
+func Resolve(base string, colors, glyphs map[string]string, border string) (Theme, error) {
 	if base == "" {
 		base = Default
 	}
@@ -184,12 +224,7 @@ func Resolve(base string, colors map[string]string) (Theme, error) {
 		return Theme{}, fmt.Errorf("theme: unknown theme %q (have %v)", base, Names())
 	}
 	// Sorted so a file with several bad keys always reports the same one first.
-	names := make([]string, 0, len(colors))
-	for name := range colors {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
+	for _, name := range sortedKeys(colors) {
 		p := t.field(name)
 		if p == nil {
 			return Theme{}, fmt.Errorf("theme: unknown color %q (have %v)", name, Fields())
@@ -200,15 +235,43 @@ func Resolve(base string, colors map[string]string) (Theme, error) {
 		}
 		*p = v
 	}
-	if base != Default || len(colors) > 0 {
+	for _, name := range sortedKeys(glyphs) {
+		p := t.glyphField(name)
+		if p == nil {
+			return Theme{}, fmt.Errorf("theme: unknown glyph %q (have %v)", name, GlyphFields())
+		}
+		*p = glyphs[name]
+	}
+	if border != "" {
+		if !borders[border] {
+			return Theme{}, fmt.Errorf("theme: unknown border %q (have %v)", border, Borders())
+		}
+		t.Border = border
+	}
+	if base != Default || len(colors) > 0 || len(glyphs) > 0 || border != "" {
 		t.Name = base
 	}
 	return t, nil
 }
 
-// Colorless returns the theme with every color stripped, keeping its name so
-// the reason is still visible in logs.
-func (t Theme) Colorless() Theme {
-	out := Theme{Name: t.Name}
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
+}
+
+// Colorless returns the theme with every color stripped, keeping its name (so
+// the reason is still visible in logs) and its glyphs and border (which aren't
+// colors — NO_COLOR shouldn't silently swap a user's chosen marker back).
+func (t Theme) Colorless() Theme {
+	return Theme{
+		Name:         t.Name,
+		FlagGlyph:    t.FlagGlyph,
+		PointerGlyph: t.PointerGlyph,
+		ArrowGlyph:   t.ArrowGlyph,
+		Border:       t.Border,
+	}
 }

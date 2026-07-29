@@ -130,7 +130,7 @@ func rowTitle(f *capture.Flow) string {
 func (m Model) renderFlowRow(f *capture.Flow, selected bool, w int) string {
 	mark := " "
 	if f.Flagged {
-		mark = "⚑"
+		mark = glyphFlag
 	}
 	code := fmt.Sprintf("%-4s", codeText(f))
 	title := rowTitle(f)

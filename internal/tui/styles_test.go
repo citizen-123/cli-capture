@@ -19,6 +19,28 @@ func restoreDefaultTheme(t *testing.T) {
 	})
 }
 
+func TestApplyThemeResolvesGlyphsAndBorder(t *testing.T) {
+	restoreDefaultTheme(t)
+
+	// Unset glyphs fall back to the built-in defaults.
+	ApplyTheme(theme.Theme{Name: "d"})
+	if glyphFlag != defFlagGlyph || glyphPointer != defPointerGlyph || glyphArrow != defArrowGlyph {
+		t.Errorf("unset glyphs did not fall back to defaults: %q %q %q", glyphFlag, glyphPointer, glyphArrow)
+	}
+	if paneBorder != lipgloss.RoundedBorder() {
+		t.Error("empty border did not default to rounded")
+	}
+
+	// Set glyphs and a border style come through.
+	ApplyTheme(theme.Theme{Name: "g", FlagGlyph: "*", PointerGlyph: ">", ArrowGlyph: "-", Border: "double"})
+	if glyphFlag != "*" || glyphPointer != ">" || glyphArrow != "-" {
+		t.Errorf("glyphs not applied: %q %q %q", glyphFlag, glyphPointer, glyphArrow)
+	}
+	if paneBorder != lipgloss.DoubleBorder() {
+		t.Error("border style not applied")
+	}
+}
+
 func TestApplyThemeReachesTheStyles(t *testing.T) {
 	restoreDefaultTheme(t)
 

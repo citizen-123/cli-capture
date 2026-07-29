@@ -572,10 +572,9 @@ func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // edited bytes, Ctrl+L fixes the HTTP Content-Length, Esc cancels back to the
 // forward/drop prompt, and everything else is typing into the textarea.
 func (m Model) onEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if k.Type == tea.KeyCtrlQ {
-		return m, tea.Quit
-	}
 	switch m.km().Action(ctxEditor, k.String()) {
+	case ActQuit:
+		return m, tea.Quit
 	case ActEditorSend:
 		if m.injecting {
 			status := m.doInject()
@@ -740,7 +739,7 @@ func (m Model) renderTraffic(w, h int) string {
 		header = fmt.Sprintf("Traffic (%d/%d)", len(vis), len(m.flows))
 	}
 	if m.flaggedOnly {
-		header += " ⚑only"
+		header += " " + glyphFlag + "only"
 	}
 	if m.sort != sortNone {
 		header += " ↕" + m.sort.String()
@@ -773,7 +772,7 @@ func (m Model) renderTraffic(w, h int) string {
 	}
 
 	if m.paused != nil {
-		b.WriteString("\n" + pendingStyle.Render("▶ "+m.paused.Title()))
+		b.WriteString("\n" + pendingStyle.Render(glyphPointer+" "+m.paused.Title()))
 		b.WriteString("\n[e]dit  [f]orward  [d]rop")
 	}
 	return b.String()
@@ -796,7 +795,7 @@ func clampIndex(i, n int) int {
 func (m Model) renderDetail() string {
 	title := "Detail"
 	if m.viewFlow != nil {
-		title = "Detail ▸ " + m.viewFlow.Title()
+		title = "Detail " + glyphArrow + " " + m.viewFlow.Title()
 	}
 	return titleStyle.Render(truncate(title, m.vp.Width)) + "\n" + m.vp.View() + "\n" + "[esc] back · j/k scroll · s save to txt"
 }
@@ -806,7 +805,7 @@ func (m Model) renderEditorTitle() string {
 		return "Inject WS frame (" + m.injectDir.String() + ")"
 	}
 	if m.paused != nil {
-		return "Edit ▶ " + m.paused.Title()
+		return "Edit " + glyphPointer + " " + m.paused.Title()
 	}
 	return "Edit request"
 }

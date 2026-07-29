@@ -3,7 +3,7 @@ package theme
 import "testing"
 
 func TestResolveDefaultsToDark(t *testing.T) {
-	got, err := Resolve("", nil)
+	got, err := Resolve("", nil, nil, "")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -17,7 +17,7 @@ func TestResolveAppliesOverrides(t *testing.T) {
 	got, err := Resolve("dark", map[string]string{
 		"focused":     "#ff8800",
 		"json.string": "42",
-	})
+	}, nil, "")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -39,18 +39,22 @@ func TestResolveRejectsBadInput(t *testing.T) {
 		name   string
 		base   string
 		colors map[string]string
+		glyphs map[string]string
+		border string
 	}{
-		{"unknown theme", "solarized", nil},
-		{"unknown field", "dark", map[string]string{"focussed": "13"}},
-		{"out of range", "dark", map[string]string{"focused": "256"}},
-		{"negative", "dark", map[string]string{"focused": "-1"}},
-		{"short hex", "dark", map[string]string{"focused": "#fff"}},
-		{"not a color", "dark", map[string]string{"focused": "orange"}},
+		{name: "unknown theme", base: "solarized"},
+		{name: "unknown field", base: "dark", colors: map[string]string{"focussed": "13"}},
+		{name: "out of range", base: "dark", colors: map[string]string{"focused": "256"}},
+		{name: "negative", base: "dark", colors: map[string]string{"focused": "-1"}},
+		{name: "short hex", base: "dark", colors: map[string]string{"focused": "#fff"}},
+		{name: "not a color", base: "dark", colors: map[string]string{"focused": "orange"}},
+		{name: "unknown glyph", base: "dark", glyphs: map[string]string{"pointerr": ">"}},
+		{name: "unknown border", base: "dark", border: "fancy"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := Resolve(c.base, c.colors); err == nil {
-				t.Errorf("Resolve(%q, %v) succeeded, want an error", c.base, c.colors)
+			if _, err := Resolve(c.base, c.colors, c.glyphs, c.border); err == nil {
+				t.Errorf("Resolve(%q, ...) succeeded, want an error", c.base)
 			}
 		})
 	}
@@ -58,12 +62,44 @@ func TestResolveRejectsBadInput(t *testing.T) {
 
 func TestEmptyColorIsAllowed(t *testing.T) {
 	// Explicitly blanking a field is how you say "render this one plain".
-	got, err := Resolve("dark", map[string]string{"flag": ""})
+	got, err := Resolve("dark", map[string]string{"flag": ""}, nil, "")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if got.Flag != "" {
 		t.Errorf("flag = %q, want empty", got.Flag)
+	}
+}
+
+func TestResolveAppliesGlyphsAndBorder(t *testing.T) {
+	got, err := Resolve("dark", nil, map[string]string{
+		"flag":    "*",
+		"pointer": ">",
+		"arrow":   "-",
+	}, "double")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.FlagGlyph != "*" || got.PointerGlyph != ">" || got.ArrowGlyph != "-" {
+		t.Errorf("glyphs not applied: %+v", got)
+	}
+	if got.Border != "double" {
+		t.Errorf("border = %q, want double", got.Border)
+	}
+}
+
+func TestColorlessKeepsGlyphsAndBorder(t *testing.T) {
+	// NO_COLOR strips colors but must not undo a user's chosen glyphs/border.
+	th, err := Resolve("dark", nil, map[string]string{"flag": "*"}, "thick")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	got := th.Colorless()
+	if got.Focused != "" {
+		t.Errorf("Colorless left a color behind: %q", got.Focused)
+	}
+	if got.FlagGlyph != "*" || got.Border != "thick" {
+		t.Errorf("Colorless dropped glyph/border: %+v", got)
 	}
 }
 
@@ -79,8 +115,25 @@ func TestEveryFieldIsSettable(t *testing.T) {
 	// Fields() is what error messages and docs advertise, so every name in it
 	// must actually resolve to a field.
 	for _, name := range Fields() {
-		if _, err := Resolve("dark", map[string]string{name: "1"}); err != nil {
+		if _, err := Resolve("dark", map[string]string{name: "1"}, nil, ""); err != nil {
 			t.Errorf("advertised field %q is not settable: %v", name, err)
+		}
+	}
+}
+
+func TestEveryGlyphIsSettable(t *testing.T) {
+	// GlyphFields() is what errors and docs advertise; each must resolve.
+	for _, name := range GlyphFields() {
+		if _, err := Resolve("dark", nil, map[string]string{name: "x"}, ""); err != nil {
+			t.Errorf("advertised glyph %q is not settable: %v", name, err)
+		}
+	}
+}
+
+func TestEveryBorderIsAccepted(t *testing.T) {
+	for _, name := range Borders() {
+		if _, err := Resolve("dark", nil, nil, name); err != nil {
+			t.Errorf("advertised border %q is rejected: %v", name, err)
 		}
 	}
 }
