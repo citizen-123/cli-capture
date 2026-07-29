@@ -71,6 +71,10 @@ type Model struct {
 	injectDir     capture.Direction
 	filtering     bool // true while editing the flow-list filter
 	fi            textinput.Model
+	cmdline       bool // true while editing the ':' command line (vim spike, #9)
+	ci            textinput.Model
+	count         int  // pending numeric prefix for list motions (5j, 3k)
+	pendingG      bool // saw one 'g'; a second makes gg (jump to top)
 	flaggedOnly   bool // show only flagged flows
 	sort          sortMode
 	showHelp      bool // floating help overlay
@@ -119,6 +123,7 @@ func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, 
 		ta:          newEditor(),
 		vp:          viewport.New(0, 0),
 		fi:          newFilter(),
+		ci:          newCommandLine(),
 		splitRatio:  0.5,
 		sessionPath: sessionPath,
 		status:      "? for help · Ctrl+A w switch pane · Ctrl+A < > resize · Ctrl+A i arm intercept · Ctrl+A q quit",
@@ -331,6 +336,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.filtering {
 			return m.onFilterKey(msg)
 		}
+		if m.cmdline {
+			return m.onCmdKey(msg)
+		}
 		if m.viewing {
 			return m.onViewKey(msg)
 		}
@@ -427,19 +435,63 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Traffic pane. Interception toggles also live here as plain letters because
 	// this pane never forwards keystrokes to the target.
-	switch m.km().Action(ctxTraffic, k.String()) {
+	key := k.String()
+	act := m.km().Action(ctxTraffic, key)
+
+	// vim-style numeric prefix and gg/G motions (spike, #9): only for keys the
+	// keymap doesn't claim (user bindings always win) and only in the traffic
+	// pane, so counts/motions never reach a target that might itself be vim.
+	if act == "" {
+		if n, ok := digit(key); ok && (n > 0 || m.count > 0) {
+			m.count = m.count*10 + n
+			if m.count > 100000 {
+				m.count = 100000
+			}
+			return m, nil
+		}
+		switch key {
+		case "g": // gg → jump to top
+			if m.pendingG {
+				m.selected, m.pendingG, m.count = 0, false, 0
+			} else {
+				m.pendingG = true
+			}
+			return m, nil
+		case "G": // jump to bottom, or to line {count}
+			target := len(m.visible()) - 1
+			if m.count > 0 {
+				target = clampIndex(m.count-1, len(m.visible()))
+			}
+			if target < 0 {
+				target = 0
+			}
+			m.selected, m.pendingG, m.count = target, false, 0
+			return m, nil
+		}
+	}
+	m.pendingG = false
+	count := m.count
+	if count < 1 {
+		count = 1
+	}
+	m.count = 0
+
+	switch act {
 	case ActInterceptRequests:
 		m.engine.SetEnabled(!m.engine.Enabled())
 	case ActInterceptResponses:
 		m.engine.SetInterceptResponses(!m.engine.InterceptResponses())
 	case ActFlowPrev:
-		if m.selected > 0 {
-			m.selected--
-		}
+		m.selected = clampIndex(m.selected-count, len(m.visible()))
 	case ActFlowNext:
-		if m.selected < len(m.visible())-1 {
-			m.selected++
-		}
+		m.selected = clampIndex(m.selected+count, len(m.visible()))
+	case ActHostNext:
+		m.selected = hostJump(m.visible(), m.selected, +1, count)
+	case ActHostPrev:
+		m.selected = hostJump(m.visible(), m.selected, -1, count)
+	case ActCommand:
+		m.cmdline = true
+		m.ci.Focus()
 	case ActFilterOpen:
 		m.filtering = true
 		m.fi.Focus()
@@ -702,7 +754,8 @@ func (m Model) View() string {
 		return "starting…"
 	}
 	if m.showHelp {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			clipToHeight(m.helpView(), m.height))
 	}
 	if m.repeating {
 		return m.repeaterView()
@@ -744,6 +797,12 @@ func (m Model) renderTraffic(w, h int) string {
 	if m.sort != sortNone {
 		header += " ↕" + m.sort.String()
 	}
+	// Pending vim motion (a count like "12" or a lone "g" awaiting the second).
+	if m.count > 0 {
+		header += fmt.Sprintf("  %d", m.count)
+	} else if m.pendingG {
+		header += "  g"
+	}
 	b.WriteString(titleStyle.Render(header) + "\n")
 
 	// Reserve lines for the header, the optional filter line, and the paused
@@ -751,6 +810,10 @@ func (m Model) renderTraffic(w, h int) string {
 	reserved := 1
 	if m.filtering || m.fi.Value() != "" {
 		b.WriteString(truncate(m.fi.View(), w) + "\n")
+		reserved++
+	}
+	if m.cmdline {
+		b.WriteString(truncate(m.ci.View(), w) + "\n")
 		reserved++
 	}
 	if m.paused != nil {

@@ -162,13 +162,16 @@ Key names are the ones the help overlay shows: single characters, `enter`,
 | Context | Actions |
 |---|---|
 | `leader` | `pane.switch` `split.shrink` `split.grow` `intercept.requests` `intercept.responses` `session.save` `export.har` `export.flagged` `help.toggle` `app.quit` |
-| `traffic` | `flow.prev` `flow.next` `flow.flag` `flow.flagged-only` `flow.sort` `flow.filter` `flow.detail` `flow.resend` `repeater.open` `export.curl` `paused.edit` `paused.forward` `paused.drop` `ws.inject.client` `ws.inject.server` `intercept.requests` `intercept.responses` `help.toggle` |
+| `traffic` | `flow.prev` `flow.next` `flow.host-next` `flow.host-prev` `flow.flag` `flow.flagged-only` `flow.sort` `flow.filter` `flow.command` `flow.detail` `flow.resend` `repeater.open` `export.curl` `paused.edit` `paused.forward` `paused.drop` `ws.inject.client` `ws.inject.server` `intercept.requests` `intercept.responses` `help.toggle` |
 | `detail` | `detail.save` `detail.close` |
 | `editor` | `editor.send` `editor.fix-length` `editor.cancel` |
 | `repeater` | `repeater.cycle-focus` `repeater.cycle-mode` `repeater.send` `repeater.close` |
 
 The `?` overlay is generated from your live keymap, so it always shows what's
-actually bound — rebind a key and the help follows.
+actually bound — rebind a key and the help follows. The vim motions and the `:`
+commands are the exception: motions are prefixes and sequences rather than keys,
+and `:` commands stay reachable even when you unbind the matching key, so both
+are listed in the overlay unconditionally. See [keybindings](keybindings.md).
 
 Two things are rejected rather than silently ignored: an action bound in a
 context that doesn't have it, and binding the leader key inside another context

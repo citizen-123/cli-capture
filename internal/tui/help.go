@@ -1,10 +1,36 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
+
+// clipToHeight bounds a rendered block to h lines. lipgloss.Place centres but
+// does not clip, so on a short terminal an over-tall help overlay scrolls its
+// own title off the top and leaves no hint that anything is missing.
+func clipToHeight(s string, h int) string {
+	if h <= 0 {
+		return s // unknown height (tests, first frame): leave it alone
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= h {
+		return s
+	}
+	if h < 2 {
+		return strings.Join(lines[:h], "\n")
+	}
+	hidden := len(lines) - (h - 1)
+	return strings.Join(lines[:h-1], "\n") + "\n" +
+		dimStyle.Render(fmt.Sprintf("  … %d more lines — resize taller to see them", hidden))
+}
+
+// vimHelpHeading opens the part of the overlay that is not keymap-derived:
+// motions (prefixes and two-key sequences the keymap cannot express) and the
+// ':' commands (deliberately available whether or not the equivalent action
+// still has a key). Tests about keymap-driven rows cut the output here.
+const vimHelpHeading = "Traffic pane — vim motions"
 
 // helpView renders the floating help box. Every row comes from the live keymap
 // rather than a second hand-maintained list, so rebinding a key updates the
@@ -45,6 +71,29 @@ func (m Model) helpView() string {
 		}
 	}
 
+	// Motions are prefixes and two-key sequences, so they cannot be keymap
+	// entries the way every row above is — hence the hand-written section.
+	b.WriteString("\n" + sectionStyle.Render(vimHelpHeading) + "\n")
+	writeHelpRow(&b, "{count}", "repeats the next motion: 5j, 3k, 2}")
+	writeHelpRow(&b, "gg / G", "first / last flow; 12G jumps to row 12")
+	writeHelpRow(&b, "esc", "discard a half-typed count")
+
+	b.WriteString("\n" + sectionStyle.Render("Traffic pane — : commands") + "\n")
+	names := make([]string, len(commands))
+	cmdWidth := 0
+	for i, c := range commands {
+		names[i] = ":" + c.name
+		if c.args != "" {
+			names[i] += " " + c.args
+		}
+		if n := len([]rune(names[i])); n > cmdWidth {
+			cmdWidth = n
+		}
+	}
+	for i, c := range commands {
+		writeHelpRowW(&b, names[i], c.desc, cmdWidth+2)
+	}
+
 	b.WriteString("\n" + sectionStyle.Render("Terminal pane (left)") + "\n")
 	writeHelpRow(&b, "any key", "forwarded to the target app; only "+km.LeaderName+" is caught")
 	writeHelpRow(&b, km.LeaderName, "pressed twice, sends a literal "+km.LeaderName+" to the target")
@@ -61,7 +110,14 @@ func (m Model) helpView() string {
 }
 
 func writeHelpRow(b *strings.Builder, keys, desc string) {
-	pad := 11 - len(keys)
+	writeHelpRowW(b, keys, desc, 11)
+}
+
+// writeHelpRowW writes one row with an explicit key-column width, so a section
+// of long names (the ':' commands) stays aligned within itself instead of
+// forcing every other section to the same wide column.
+func writeHelpRowW(b *strings.Builder, keys, desc string, width int) {
+	pad := width - len([]rune(keys))
 	if pad < 1 {
 		pad = 1
 	}

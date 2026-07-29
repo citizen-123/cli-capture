@@ -32,10 +32,13 @@ const (
 
 	ActFlowNext    Action = "flow.next"
 	ActFlowPrev    Action = "flow.prev"
+	ActHostNext    Action = "flow.host-next"
+	ActHostPrev    Action = "flow.host-prev"
 	ActFlowFlag    Action = "flow.flag"
 	ActFlaggedOnly Action = "flow.flagged-only"
 	ActSortCycle   Action = "flow.sort"
 	ActFilterOpen  Action = "flow.filter"
+	ActCommand     Action = "flow.command"
 	ActFlowResend  Action = "flow.resend"
 	ActDetailOpen  Action = "flow.detail"
 	ActRepeaterNew Action = "repeater.open"
@@ -108,6 +111,9 @@ var defaults = map[string][]binding{
 		{ActFlaggedOnly, []string{"F"}, "show flagged only"},
 		{ActSortCycle, []string{"o"}, "cycle sort: none / status / size"},
 		{ActFilterOpen, []string{"/"}, "filter by host / method / path / status"},
+		{ActCommand, []string{":"}, "command line — :filter :sort :har :flagged :curl :w :q"},
+		{ActHostNext, []string{"}"}, "jump to the next flow from a different host"},
+		{ActHostPrev, []string{"{"}, "jump back to the previous host"},
 		{ActDetailOpen, []string{"enter"}, "open detail view"},
 		{ActInterceptRequests, []string{"i"}, "toggle intercept: requests"},
 		{ActInterceptResponses, []string{"r"}, "toggle intercept: responses"},
