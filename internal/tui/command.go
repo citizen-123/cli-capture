@@ -91,7 +91,7 @@ var commands = []command{
 			}
 			return m, nil
 		}},
-	{name: "curl", aliases: []string{"y"}, desc: "copy the selected flow as a curl command",
+	{name: "curl", aliases: []string{"y"}, desc: "write the selected flow to a .curl file",
 		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.exportCurlSelected(); return m, nil }},
 	{name: "resend", aliases: []string{"x"}, desc: "resend the selected flow",
 		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.resendSelected(); return m, nil }},

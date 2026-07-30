@@ -98,6 +98,13 @@ func TestCommandHelpIncludesAliases(t *testing.T) {
 	}
 }
 
+func TestCommandHelpDescribesCurlAsAFileExport(t *testing.T) {
+	out := (Model{}).helpBody()
+	if !strings.Contains(out, "write the selected flow to a .curl file") {
+		t.Error("command help must describe :curl as writing a .curl file")
+	}
+}
+
 // The overlay body is far taller than a terminal, and the ':' command section
 // sits near the bottom. Before scrolling it was simply unreachable, which made
 // the "table documents itself" design a fiction.
