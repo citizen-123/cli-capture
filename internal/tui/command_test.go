@@ -1,12 +1,15 @@
 package tui
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
+	"github.com/citizen-123/cli-capture/internal/runner"
 )
 
 // modelWithFlows builds a traffic-pane model with n flows. The text inputs must
@@ -330,6 +333,37 @@ func TestCountedGotoFirstRow(t *testing.T) {
 	}
 }
 
+func TestVimKeysPassThroughTerminalPane(t *testing.T) {
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readEnd.Close()
+
+	m := modelWithFlows(1)
+	m.focus = focusTerminal
+	m.target = &runner.Target{Pty: writeEnd}
+
+	for _, typed := range []string{"5", "g", "G", ":", "{", "}"} {
+		next, _ := m.onKey(key(typed))
+		m = next.(Model)
+	}
+	if err := writeEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(readEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "5gG:{}"; string(got) != want {
+		t.Errorf("terminal received %q, want %q", got, want)
+	}
+	if m.count != 0 || m.pendingG || m.cmdline {
+		t.Errorf("terminal keys changed vim state: count=%d pendingG=%v cmdline=%v",
+			m.count, m.pendingG, m.cmdline)
+	}
+}
+
 // ':filter' and '/' must resolve an out-of-range selection identically, or the
 // documented equivalence between a command and its key is a lie.
 func TestFilterCommandMatchesTheFilterKey(t *testing.T) {
@@ -374,22 +408,18 @@ func TestFlaggedCommandTogglesTheViewRatherThanWriting(t *testing.T) {
 }
 
 func TestFlagCommandMatchesSpaceInFlaggedOnlyView(t *testing.T) {
-	base := modelWithFlows(2)
-	for _, f := range base.flows {
-		f.Flagged = true
+	flaggedModel := func() Model {
+		m := modelWithFlows(2)
+		for _, f := range m.flows {
+			f.Flagged = true
+		}
+		m.flaggedOnly = true
+		m.selected = 1
+		return m
 	}
-	base.flaggedOnly = true
-	base.selected = 1
 
-	viaKey := base
-	viaKey.flows = append([]*capture.Flow(nil), base.flows...)
-	keyFlow := *base.flows[1]
-	viaKey.flows[1] = &keyFlow
-
-	viaCommand := base
-	viaCommand.flows = append([]*capture.Flow(nil), base.flows...)
-	commandFlow := *base.flows[1]
-	viaCommand.flows[1] = &commandFlow
+	viaKey := flaggedModel()
+	viaCommand := flaggedModel()
 
 	next, _ := viaKey.onKey(key(" "))
 	viaKey = next.(Model)
