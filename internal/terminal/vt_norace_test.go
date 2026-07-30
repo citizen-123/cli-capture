@@ -14,9 +14,10 @@
 //
 // The guard is redundant rather than load-bearing, which is why the upstream fix
 // is one line: the real unblocking is pw.CloseWithError(io.EOF) on an
-// internally-synchronized io.Pipe, and `closed` is only an early-out. Filed
-// upstream with a patch making the field an atomic.Bool; against a patched vt,
-// this package's whole suite passes -race with no exclusions at all, which is
+// internally-synchronized io.Pipe, and `closed` is only an early-out. Tracked
+// upstream as charmbracelet/x#879, with a fix already proposed in
+// charmbracelet/x#881 (atomic.Bool). Applying that patch locally turns this
+// package's whole suite green under -race with no exclusions at all, which is
 // the evidence that nothing here is racing on its own account.
 //
 // Until that lands these tests are excluded from `go test -race` (which sets the
