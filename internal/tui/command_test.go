@@ -179,6 +179,25 @@ func TestHostMotions(t *testing.T) {
 	}
 }
 
+func TestHostJumpUsesDisplayedHostIdentity(t *testing.T) {
+	flows := []*capture.Flow{
+		capture.NewFlow("c", "10.0.0.1:443"),
+		capture.NewFlow("c", "10.0.0.2:8443"),
+		capture.NewFlow("c", "api.example.com:80"),
+		capture.NewFlow("c", "api.example.com:443"),
+		capture.NewFlow("c", "other.example.com:443"),
+	}
+	flows[0].SNI = "api.example.com"
+	flows[1].SNI = "api.example.com"
+
+	if got := hostJump(flows, 0, +1, 1); got != 4 {
+		t.Errorf("next displayed host from row 0 = %d, want 4", got)
+	}
+	if got := hostJump(flows, 4, -1, 1); got != 0 {
+		t.Errorf("previous displayed host from row 4 = %d, want 0", got)
+	}
+}
+
 func TestHostMotionEmptyList(t *testing.T) {
 	m := modelWithHosts()
 	if got := hostJump(m.visible(), 0, +1, 1); got != 0 {

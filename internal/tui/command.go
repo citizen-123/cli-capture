@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"net"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -176,6 +177,17 @@ func (m Model) runCommand(line string) (tea.Model, tea.Cmd) {
 	return c.run(m, arg)
 }
 
+func flowHost(f *capture.Flow) string {
+	if f.SNI != "" {
+		return f.SNI
+	}
+	host, _, err := net.SplitHostPort(f.ServerAddr)
+	if err == nil {
+		return host
+	}
+	return f.ServerAddr
+}
+
 // hostJump moves across host boundaries in the flow list the way } and { move
 // across paragraphs in vim: a run of consecutive flows sharing a host is the
 // "paragraph". Forward lands on the first flow of the next host; backward lands
@@ -190,19 +202,19 @@ func hostJump(vis []*capture.Flow, from, dir, count int) int {
 	for ; count > 0; count-- {
 		j := i
 		if dir > 0 {
-			for j < len(vis)-1 && vis[j+1].ServerAddr == vis[i].ServerAddr {
+			for j < len(vis)-1 && flowHost(vis[j+1]) == flowHost(vis[i]) {
 				j++
 			}
 			if j < len(vis)-1 {
 				j++ // first flow of the next host
 			}
 		} else {
-			for j > 0 && vis[j-1].ServerAddr == vis[i].ServerAddr {
+			for j > 0 && flowHost(vis[j-1]) == flowHost(vis[i]) {
 				j-- // first flow of the current host
 			}
 			if j == i && j > 0 { // already there, so step into the previous host
 				j--
-				for j > 0 && vis[j-1].ServerAddr == vis[j].ServerAddr {
+				for j > 0 && flowHost(vis[j-1]) == flowHost(vis[j]) {
 					j--
 				}
 			}

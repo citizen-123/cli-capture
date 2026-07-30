@@ -60,6 +60,10 @@ bound through the keymap, because a count is a prefix and `gg` is a sequence —
 neither is a single key the keymap can name. (`}` and `{` *are* single keys, so
 they are ordinary bindings and can be rebound like any other.)
 
+For `}` and `{`, a host is the TLS SNI name when present; otherwise it is the
+requested hostname without its port. Consecutive flows for that host form one
+jump group.
+
 | Keys | Motion |
 |---|---|
 | `{count}` | repeat the next motion — `5j`, `3k`, `2}` |
