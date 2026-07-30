@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
@@ -80,12 +81,36 @@ func (v *VT) pumpReplies(resp io.Writer) {
 	}
 }
 
-// Close stops the emulator — unblocking a pending Read with io.EOF — and
-// waits for the reply pump to exit, so callers never leak the goroutine
-// NewVT started.
+// closeGrace bounds how long Close waits for the reply pump to exit. The wait
+// is normally instant — term.Close unblocks a pump parked in Read immediately —
+// so this only ever elapses in the case it exists for, where the pump cannot
+// be woken at all.
+const closeGrace = 250 * time.Millisecond
+
+// Close stops the emulator — unblocking a pending Read with io.EOF — and waits
+// for the reply pump to exit, so callers don't leak the goroutine NewVT
+// started.
+//
+// The wait is bounded because term.Close can only reach a pump parked in Read.
+// pumpReplies has a second parking spot: resp.Write, into the target's PTY,
+// which is where it sits whenever a stalled child has stopped draining its own
+// pty. Nothing Close does from here wakes a goroutine blocked there, so an
+// unbounded wait turned "the child wedged" into "quitting the TUI wedges too" —
+// the operator's one remaining escape hatch, gone.
+//
+// Bounding the wait treats the symptom. The cause-level fix would be a write
+// deadline on the pty, but darwin rejects SetWriteDeadline on a pty master
+// outright ("file type does not support deadline"), so there is nothing to set.
+// Past the grace period the pump is abandoned: it is blocked writing to a
+// descriptor the process is about to drop, and shutting down beats reclaiming
+// it. The emulator's error is returned either way — whether the pump got out is
+// not the caller's business.
 func (v *VT) Close() error {
 	err := v.term.Close()
-	<-v.done
+	select {
+	case <-v.done:
+	case <-time.After(closeGrace):
+	}
 	return err
 }
 
