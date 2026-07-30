@@ -43,10 +43,33 @@ func contentGrid(box rect) (cols, rows int) {
 	return paneW - 2, paneH - 1
 }
 
-// onMouse dispatches a mouse event to whichever pane it landed in.
+// onMouse dispatches a mouse event to whichever pane it landed in — after the
+// modal states have had their say.
+//
+// The gate below mirrors the precedence Update's tea.KeyMsg branch already
+// establishes, because a mouse event is no less modal than a keystroke. Where
+// it splits the states differently is on what View() actually draws:
+//
+//   - showHelp and repeating paint over the WHOLE screen, so the panes are not
+//     on it and a click has nothing behind the overlay to hit. Both are handled
+//     here, and both route the wheel to the thing that is on screen.
+//   - filtering and cmdline leave both panes drawn, but a focused text input
+//     owns the input stream — no keystroke reaches a pane while one is open, so
+//     no click should either.
+//   - editing and viewing replace only the RIGHT pane's content; the terminal
+//     pane is still drawn and still live. They stay pane-local in
+//     onRightPaneMouse rather than swallowing input meant for the left pane.
 func (m Model) onMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.width == 0 {
 		return m, nil // nothing has been sized/drawn yet
+	}
+	switch {
+	case m.showHelp:
+		return m.onHelpMouse(ev)
+	case m.repeating:
+		return m.onRepeaterMouse(ev)
+	case m.filtering, m.cmdline:
+		return m, nil
 	}
 	left, right := m.paneRects()
 	switch {
@@ -56,6 +79,53 @@ func (m Model) onMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.onRightPaneMouse(ev, right)
 	}
 	return m, nil // the status bar row, or the sliver past the two panes
+}
+
+// wheelLines is how many lines one wheel notch moves an overlay that scrolls
+// by line. It matches the delta bubbles' viewport uses by default, so the help
+// overlay, the detail view and the raw editor all scroll at the same rate.
+const wheelLines = 3
+
+// onHelpMouse handles mouse input while the help overlay is up. The wheel
+// scrolls it, clamped exactly the way onHelpKey clamps j/k — the body runs well
+// past a screen, so scrolling is what makes the ':' commands near the bottom
+// reachable at all, and the wheel is the obvious way to ask for it. Everything
+// else is swallowed: the overlay is the only thing drawn, so a click has
+// nothing to land on and must not disturb the panes hidden behind it.
+func (m Model) onHelpMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if ev.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	switch ev.Button {
+	case tea.MouseButtonWheelUp:
+		m.helpScroll -= wheelLines
+	case tea.MouseButtonWheelDown:
+		m.helpScroll += wheelLines
+	default:
+		return m, nil
+	}
+	if max := m.maxHelpScroll(m.height); m.helpScroll > max {
+		m.helpScroll = max
+	}
+	if m.helpScroll < 0 {
+		m.helpScroll = 0
+	}
+	return m, nil
+}
+
+// onRepeaterMouse handles mouse input while the Repeater modal is up. Like the
+// help overlay it owns the whole screen, so clicks are swallowed; the wheel
+// goes to whichever section has focus, which is the same fall-through
+// onRepeaterKey uses for keys it doesn't claim. Only the response section is a
+// viewport, so in practice only that one moves — the two textarea sections
+// ignore mouse input entirely (see wheelEditor).
+func (m Model) onRepeaterMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if !tea.MouseEvent(ev).IsWheel() || m.rep.focus != repFocusResp {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.rep.respVP, cmd = m.rep.respVP.Update(ev)
+	return m, cmd
 }
 
 // onLeftPaneMouse focuses the terminal pane and forwards the event to the
@@ -210,9 +280,15 @@ func (m Model) onRightPaneMouse(ev tea.MouseMsg, box rect) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
-// onRightPaneWheel scrolls the open detail viewport, or otherwise moves the
-// flow-list selection exactly the way the j/k keys do (see onKey).
+// onRightPaneWheel scrolls whichever overlay the right pane is currently
+// showing, or otherwise moves the flow-list selection exactly the way the j/k
+// keys do (see onKey). The editing/viewing checks mirror the click path's
+// guard: with an overlay drawn over the flow list, moving the selection
+// underneath it is a change the operator cannot see.
 func (m Model) onRightPaneWheel(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.editing {
+		return m.wheelEditor(ev)
+	}
 	if m.viewing {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(ev)
@@ -229,6 +305,37 @@ func (m Model) onRightPaneWheel(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// wheelEditor scrolls the raw-request editor by one notch.
+//
+// It cannot just hand the event to m.ta.Update: bubbles' textarea has no mouse
+// handling at all — unlike viewport, which is why the detail view above can
+// forward the message verbatim — so doing that would compile, run, and
+// silently scroll nothing. Translating the notch into the up/down keys the
+// textarea does bind walks the cursor, and the textarea slides its own window
+// to keep the cursor visible. It is the same move wheelPageKey makes on the
+// terminal pane, where a notch becomes PgUp/PgDn.
+func (m Model) wheelEditor(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if ev.Action != tea.MouseActionPress {
+		return m, nil
+	}
+	var key tea.KeyMsg
+	switch ev.Button {
+	case tea.MouseButtonWheelUp:
+		key = tea.KeyMsg{Type: tea.KeyUp}
+	case tea.MouseButtonWheelDown:
+		key = tea.KeyMsg{Type: tea.KeyDown}
+	default:
+		return m, nil // a horizontal notch has no line to move to
+	}
+	cmds := make([]tea.Cmd, 0, wheelLines)
+	for i := 0; i < wheelLines; i++ {
+		var cmd tea.Cmd
+		m.ta, cmd = m.ta.Update(key)
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // trafficRowLayout mirrors renderTraffic's row accounting: how many rows sit

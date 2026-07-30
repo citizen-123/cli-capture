@@ -273,6 +273,180 @@ func TestOnMouseRightPaneWheelMovesSelectionClamped(t *testing.T) {
 	}
 }
 
+// --- modal gating ---
+
+// modalModel builds a sized model with a 5-flow list and every input
+// constructed, ready for a test to raise one modal flag on it. focus starts at
+// focusTerminal and selected at 0, so any leak through the modal gate shows up
+// as one of those changing.
+func modalModel(screen *fakeEmulator) Model {
+	return Model{
+		width:      100,
+		height:     40,
+		splitRatio: 0.5,
+		fi:         newFilter(),
+		ci:         newCommandLine(),
+		ta:         newEditor(),
+		vp:         viewport.New(0, 0),
+		rep:        repeaterState{respVP: viewport.New(0, 0)},
+		flows:      newFlows(5),
+		screen:     screen,
+		target:     &runner.Target{},
+	}
+}
+
+// editingModel builds a model with the raw editor open over the right pane,
+// seeded with body and the cursor parked on its first line.
+//
+// The Focus() call is load-bearing rather than cosmetic: bubbles' textarea
+// short-circuits Update entirely while blurred, so an unfocused editor silently
+// ignores everything sent to it and a scroll assertion would fail for a reason
+// that has nothing to do with the wheel. enterEdit and enterInject are the only
+// two places that set m.editing, and both focus the textarea, so this mirrors
+// the only state the app can actually reach.
+func editingModel(body string) Model {
+	m := modalModel(nil)
+	m.editing = true
+	m.ta.SetWidth(40)
+	m.ta.SetHeight(5)
+	m.ta.SetValue(body)
+	m.ta.Focus()
+	for m.ta.Line() > 0 {
+		m.ta.CursorUp()
+	}
+	return m
+}
+
+// TestModalStatesSwallowClicksBehindThem is finding 1: before this gate,
+// tea.MouseMsg was dispatched straight to the panes without consulting a single
+// modal flag, so a click behind an overlay silently moved the selection — or
+// reached the child — under a screen that isn't showing either pane.
+//
+// The states here are the ones that own the whole screen (help, repeater) or
+// own the input stream (filter, ':' command line), matching the precedence
+// Update's tea.KeyMsg branch already enforces for keystrokes.
+func TestModalStatesSwallowClicksBehindThem(t *testing.T) {
+	modals := []struct {
+		name string
+		set  func(*Model)
+	}{
+		{"help overlay", func(m *Model) { m.showHelp = true }},
+		{"repeater", func(m *Model) { m.repeating = true }},
+		{"filter input", func(m *Model) { m.filtering = true }},
+		{"command line", func(m *Model) { m.cmdline = true }},
+	}
+	for _, modal := range modals {
+		t.Run(modal.name, func(t *testing.T) {
+			base := modalModel(nil)
+			left, right := base.paneRects()
+			clicks := []struct {
+				where string
+				x, y  int
+			}{
+				{"left pane", left.X + 2, left.Y + 2},
+				{"right pane flow row", right.X + 2, right.Y + 3},
+			}
+			for _, click := range clicks {
+				screen := &fakeEmulator{}
+				m := modalModel(screen)
+				modal.set(&m)
+
+				ev := tea.MouseMsg{X: click.x, Y: click.y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+				newModel, _ := m.Update(ev)
+				got := newModel.(Model)
+
+				if got.focus != focusTerminal {
+					t.Errorf("%s: click on the %s changed focus to %v; nothing behind a modal may be clicked",
+						modal.name, click.where, got.focus)
+				}
+				if got.selected != 0 {
+					t.Errorf("%s: click on the %s moved the selection to %d, want 0",
+						modal.name, click.where, got.selected)
+				}
+				if len(screen.forwarded) != 0 {
+					t.Errorf("%s: click on the %s reached the child: %+v",
+						modal.name, click.where, screen.forwarded)
+				}
+			}
+		})
+	}
+}
+
+// TestHelpOverlayWheelScrolls is the routing half of the help gate: the overlay
+// swallows clicks, but the body runs well past a screen, so the wheel has to
+// scroll it the way j/k do in onHelpKey — including the same clamp at the top.
+func TestHelpOverlayWheelScrolls(t *testing.T) {
+	m := modalModel(nil)
+	m.showHelp = true
+	wheel := func(btn tea.MouseButton) tea.MouseMsg {
+		return tea.MouseMsg{X: 10, Y: 10, Action: tea.MouseActionPress, Button: btn}
+	}
+
+	down, _ := m.Update(wheel(tea.MouseButtonWheelDown))
+	if got := down.(Model).helpScroll; got != wheelLines {
+		t.Errorf("wheel down over the help overlay: helpScroll = %d, want %d", got, wheelLines)
+	}
+
+	atTop, _ := m.Update(wheel(tea.MouseButtonWheelUp))
+	if got := atTop.(Model).helpScroll; got != 0 {
+		t.Errorf("wheel up at the top of the help overlay should clamp at 0, got %d", got)
+	}
+}
+
+// TestHelpOverlayWheelClampsAtBottom pins the other end of the clamp, so a
+// determined scroll can't run the window past the end of the body and render a
+// short (or empty) overlay.
+func TestHelpOverlayWheelClampsAtBottom(t *testing.T) {
+	m := modalModel(nil)
+	m.showHelp = true
+	m.helpScroll = m.maxHelpScroll(m.height)
+
+	ev := tea.MouseMsg{X: 10, Y: 10, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
+	newModel, _ := m.Update(ev)
+	if got, want := newModel.(Model).helpScroll, m.maxHelpScroll(m.height); got != want {
+		t.Errorf("wheel down at the bottom of the help overlay: helpScroll = %d, want it clamped at %d", got, want)
+	}
+}
+
+// TestEditorWheelScrollsEditorNotTrafficList is finding 2: the click path
+// guarded on m.editing but the wheel path guarded only on m.viewing, so a notch
+// over the open editor moved the flow selection hidden underneath it. The wheel
+// now walks the editor instead.
+func TestEditorWheelScrollsEditorNotTrafficList(t *testing.T) {
+	lines := make([]string, 40)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %02d", i)
+	}
+	m := editingModel(strings.Join(lines, "\n"))
+
+	_, right := m.paneRects()
+	ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
+
+	newModel, _ := m.Update(ev)
+	got := newModel.(Model)
+	if got.ta.Line() != wheelLines {
+		t.Errorf("wheel down over the open editor: cursor line = %d, want %d — the editor did not scroll",
+			got.ta.Line(), wheelLines)
+	}
+	if got.selected != 0 {
+		t.Errorf("wheel over the open editor moved the flow selection to %d; the list is behind the editor", got.selected)
+	}
+}
+
+// TestEditorWheelUpClampsAtFirstLine checks the wheel can't walk the cursor off
+// the top of the editor.
+func TestEditorWheelUpClampsAtFirstLine(t *testing.T) {
+	m := editingModel("line 0\nline 1\nline 2")
+
+	_, right := m.paneRects()
+	ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp}
+
+	newModel, _ := m.Update(ev)
+	if got := newModel.(Model).ta.Line(); got != 0 {
+		t.Errorf("wheel up at the first line of the editor: cursor line = %d, want 0", got)
+	}
+}
+
 // TestOnMouseRightPaneWheelScrollsViewportWhenViewing checks the detail-view
 // override: with the viewer open, wheel events scroll m.vp instead of moving
 // the flow-list selection underneath it.
