@@ -117,6 +117,29 @@ func TestGotoMotions(t *testing.T) {
 	}
 }
 
+func TestGotoMotionsCanBeDisabled(t *testing.T) {
+	km, err := NewKeyMap("", map[string]map[string]string{
+		ctxTraffic: {
+			"g": string(Unbind),
+			"G": string(Unbind),
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewKeyMap: %v", err)
+	}
+	m := modelWithFlows(8).WithKeys(km)
+	m.selected = 4
+
+	m = press(t, m, "G")
+	if m.selected != 4 {
+		t.Errorf("disabled G moved selection to %d, want 4", m.selected)
+	}
+	m = press(t, m, "g", "g")
+	if m.selected != 4 {
+		t.Errorf("disabled gg moved selection to %d, want 4", m.selected)
+	}
+}
+
 // modelWithHosts builds a flow list from a sequence of host names, so a run of
 // equal names is one "paragraph" for the } and { motions.
 func modelWithHosts(hosts ...string) Model {

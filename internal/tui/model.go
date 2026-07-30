@@ -479,7 +479,7 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// vim-style numeric prefix and gg/G motions (spike, #9): only for keys the
 	// keymap doesn't claim (user bindings always win) and only in the traffic
 	// pane, so counts/motions never reach a target that might itself be vim.
-	if act == "" {
+	if act == "" && !m.km().claims(ctxTraffic, key) {
 		if n, ok := digit(key); ok && (n > 0 || m.count > 0) {
 			m.count = m.count*10 + n
 			if m.count > 100000 {

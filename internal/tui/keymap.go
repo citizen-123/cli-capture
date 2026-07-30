@@ -267,7 +267,10 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 				return KeyMap{}, fmt.Errorf("keys: %s: %q is the leader, so it never reaches this context", ctx, key)
 			}
 			if action == Unbind {
-				delete(km.binds[ctx], key)
+				// Keep an explicit tombstone. Action still reports this as
+				// unbound, but the vim fallback can distinguish a user's
+				// deliberate "none" from a key that was never configured.
+				km.binds[ctx][key] = Unbind
 				continue
 			}
 			km.binds[ctx][key] = action
@@ -290,7 +293,22 @@ func (k KeyMap) Action(ctx, key string) Action {
 	if k.binds == nil {
 		return defaultKeyMap.Action(ctx, key) // cached; do not rebuild per keystroke
 	}
-	return k.binds[ctx][key]
+	a := k.binds[ctx][key]
+	if a == Unbind {
+		return ""
+	}
+	return a
+}
+
+// claims reports whether the keymap explicitly owns key, including an
+// override to "none". This lets built-in multi-key motions honor an explicit
+// unbind while still using otherwise-unclaimed keys as prefixes.
+func (k KeyMap) claims(ctx, key string) bool {
+	if k.binds == nil {
+		return defaultKeyMap.claims(ctx, key)
+	}
+	_, ok := k.binds[ctx][key]
+	return ok
 }
 
 // keysFor lists the keys bound to an action, defaults first (in their declared
