@@ -21,21 +21,42 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
+	"github.com/citizen-123/cli-capture/internal/config"
 	"github.com/citizen-123/cli-capture/internal/intercept"
 	"github.com/citizen-123/cli-capture/internal/proxy"
 	"github.com/citizen-123/cli-capture/internal/proxy/ca"
 	"github.com/citizen-123/cli-capture/internal/runner"
 	"github.com/citizen-123/cli-capture/internal/scope"
 	"github.com/citizen-123/cli-capture/internal/terminal"
+	"github.com/citizen-123/cli-capture/internal/theme"
 	"github.com/citizen-123/cli-capture/internal/transparent"
 	"github.com/citizen-123/cli-capture/internal/tui"
 )
 
+// Build metadata, overridden at release time via -ldflags "-X main.version=...".
+// GoReleaser populates these by default (see .goreleaser.yaml).
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	var (
-		listen  = flag.String("listen", "127.0.0.1:0", "proxy listen address")
-		confDir = flag.String("dir", defaultDir(), "config/CA directory")
+		showVersion = flag.Bool("version", false, "print version and exit")
 
+		listen  = flag.String("listen", "127.0.0.1:0", "proxy listen address")
+		confDir = flag.String("dir", defaultDir(), "data directory: CA, sessions, exports, log")
+
+		themeName = flag.String("theme", "", "color theme: "+strings.Join(theme.Names(), " | ")+" (default "+theme.Default+")")
+	)
+
+	// -config may be repeated and/or comma-separated; every file merges in the
+	// order given, on top of the default config.
+	var configs config.Paths
+	flag.Var(&configs, "config", "config file(s) or preset name(s) in "+config.Dir()+"; repeatable, comma-separated")
+
+	var (
 		scopeInc = flag.String("scope", "", "intercept these (comma-separated specs; default: all). Spec: [!][field:]pattern, e.g. '*.github.com', 'path:/v1/*', 'method:=POST', 'host:~^api\\.'")
 		scopeExc = flag.String("exclude", "", "never intercept these (comma-separated specs); wins over -scope")
 		lastWins = flag.Bool("last-match", false, "evaluate all rules and take the last match (default: first match wins)")
@@ -48,22 +69,48 @@ func main() {
 		transparentApply = flag.Bool("transparent-apply", false, "actually install/remove the nftables redirect (needs root); otherwise the rules are only logged")
 
 		loadPath = flag.String("load", "", "preload a saved capture session (JSON) into the flow list")
-
-		leaderSpec = flag.String("leader", "ctrl+a", "tmux-style prefix key for cli-capture's own commands: ctrl+a … ctrl+z, or ctrl+space")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("cli-capture %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
+
 	argv := flag.Args()
 	if len(argv) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: cli-capture [flags] -- <command> [args...]")
 		os.Exit(2)
 	}
 
-	// Parse the leader before anything is spawned, so a typo fails on stderr
-	// rather than after the TUI has taken the screen.
-	leader, err := tui.ParseLeader(*leaderSpec)
+	// User configuration: theme and keymap. Loaded before anything renders, and
+	// fatal on error — a config that half-applied would be worse than a refusal.
+	cfg, err := config.Load(configs, *confDir)
 	if err != nil {
-		fatal("leader: %v", err)
+		fatal("%v", err)
 	}
+	log.Printf("config: %s", cfg.Describe())
+
+	if *themeName != "" {
+		cfg.Theme.Base = *themeName // the flag wins over the file
+	}
+	palette, err := theme.Resolve(cfg.Theme.Base, cfg.Theme.Colors, cfg.Theme.Glyphs, cfg.Theme.Border)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if os.Getenv("NO_COLOR") != "" {
+		palette = palette.Colorless()
+		log.Printf("theme: %s (NO_COLOR set — colors stripped)", palette.Name)
+	} else {
+		log.Printf("theme: %s", palette.Name)
+	}
+	tui.ApplyTheme(palette)
+
+	keys, err := tui.NewKeyMap(cfg.Keys.Leader, cfg.Keys.Bindings)
+	if err != nil {
+		fatal("%v", err)
+	}
+	log.Printf("keys: leader %s", keys.LeaderName)
 
 	authority, err := ca.LoadOrCreate(*confDir)
 	if err != nil {
@@ -189,7 +236,9 @@ func main() {
 	go pumpPTY(target, screen, ptyCh)
 
 	feeds := tui.Feeds{Events: store.Subscribe(), Pty: ptyCh, Pause: pauseCh}
-	model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json"), leader)
+	model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json")).WithKeys(keys)
+	// WithMouseCellMotion enables mouse reporting; the model's mouseCapture
+	// toggle (leader m) flips it at runtime for native text selection.
 	prog := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	// Quit the UI when the child exits.

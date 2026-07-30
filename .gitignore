@@ -2,3 +2,9 @@
 *.log
 # local CA / config
 /.cli-capture/
+
+# goreleaser build output
+/dist/
+
+# git worktrees used for per-task isolation (see worktree skill)
+/.worktrees/

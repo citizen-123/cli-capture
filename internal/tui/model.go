@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -70,23 +71,54 @@ type Model struct {
 	injectDir     capture.Direction
 	filtering     bool // true while editing the flow-list filter
 	fi            textinput.Model
-	flaggedOnly   bool   // show only flagged flows
-	showHelp      bool   // floating help overlay
-	sessionPath   string // where "save session" writes
+	cmdline       bool // true while editing the ':' command line (vim spike, #9)
+	ci            textinput.Model
+	count         int  // pending numeric prefix for list motions (5j, 3k)
+	pendingG      bool // saw one 'g'; a second makes gg (jump to top)
+	flaggedOnly   bool // show only flagged flows
+	sort          sortMode
+	showHelp      bool // floating help overlay
+	helpScroll    int  // first visible line of the help overlay
+	repeating     bool // repeater modal open
+	rep           repeaterState
+	splitRatio    float64 // fraction of the width given to the left (terminal) pane
+	sessionPath   string  // where "save session" writes
 	status        string
 	// mouseCapture tracks whether cli-capture is asking bubbletea to report
 	// mouse events. Capturing the mouse steals native terminal-emulator text
 	// selection/copy-paste, so the operator needs a way to hand it back
-	// without restarting — see the leader "m" command.
+	// without restarting — see the leader mouse-capture command.
 	mouseCapture bool
-	// leader is the tmux-style prefix: press it, then a command key. Only this
-	// one chord is taken from the target — everything else in the terminal pane
-	// passes through untouched — so it is configurable via -leader for operators
-	// whose target app needs the default binding.
-	leader Leader
+	keys         KeyMap // key → action bindings; zero value means the defaults
 }
 
-func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, screen terminal.Emulator, feeds Feeds, sessionPath string, leader Leader) Model {
+// WithKeys returns the model using km for dispatch and for the help overlay.
+func (m Model) WithKeys(km KeyMap) Model {
+	m.keys = km
+	return m
+}
+
+// km is the model's keymap, falling back to the defaults so a zero-value Model
+// (as used in tests) still dispatches and renders help.
+func (m Model) km() KeyMap {
+	if m.keys.binds == nil {
+		return defaultKeyMap
+	}
+	return m.keys
+}
+
+// defaultKeyMap is built once: dispatch consults it on every keystroke.
+var defaultKeyMap = DefaultKeyMap()
+
+// Split resize bounds. splitStep is the per-keystroke adjustment; the ratio is
+// clamped to [minSplit, maxSplit] so neither pane can be squeezed to nothing.
+const (
+	splitStep = 0.05
+	minSplit  = 0.2
+	maxSplit  = 0.8
+)
+
+func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, screen terminal.Emulator, feeds Feeds, sessionPath string) Model {
 	return Model{
 		store:       store,
 		engine:      engine,
@@ -97,13 +129,13 @@ func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, 
 		ta:          newEditor(),
 		vp:          viewport.New(0, 0),
 		fi:          newFilter(),
+		ci:          newCommandLine(),
+		splitRatio:  0.5,
 		sessionPath: sessionPath,
-		leader:      leader,
 		// main.go starts the tea.Program with tea.WithMouseCellMotion(); this
-		// mirrors that so the leader "m" toggle's first press turns capture off.
+		// mirrors that so the mouse-capture toggle's first press turns capture off.
 		mouseCapture: true,
-		status: fmt.Sprintf("? for help · %[1]s w switch pane · %[1]s i arm intercept · %[1]s q quit",
-			leader.Name),
+		status:       "? for help · Ctrl+A w switch pane · Ctrl+A < > resize · Ctrl+A i arm intercept · Ctrl+A q quit",
 	}
 }
 
@@ -122,7 +154,7 @@ func (m Model) saveSession() string {
 // flow's title, protocol, status, and server address.
 func (m Model) visible() []*capture.Flow {
 	q := strings.ToLower(strings.TrimSpace(m.fi.Value()))
-	if q == "" && !m.flaggedOnly {
+	if q == "" && !m.flaggedOnly && m.sort == sortNone {
 		return m.flows
 	}
 	out := make([]*capture.Flow, 0, len(m.flows))
@@ -141,6 +173,12 @@ func (m Model) visible() []*capture.Flow {
 		}
 		out = append(out, f)
 	}
+	switch m.sort {
+	case sortStatus:
+		sort.SliceStable(out, func(i, j int) bool { return rowCode(out[i]) < rowCode(out[j]) })
+	case sortSize:
+		sort.SliceStable(out, func(i, j int) bool { return respSize(out[i]) > respSize(out[j]) })
+	}
 	return out
 }
 
@@ -151,6 +189,19 @@ func (m Model) selectedFlow() *capture.Flow {
 		return nil
 	}
 	return vis[m.selected]
+}
+
+func (m *Model) toggleSelectedFlag() string {
+	f := m.selectedFlow()
+	if f == nil {
+		return "nothing selected to flag"
+	}
+	f.Flagged = !f.Flagged
+	m.selected = clampIndex(m.selected, len(m.visible()))
+	if f.Flagged {
+		return "flagged " + f.Title()
+	}
+	return "unflagged " + f.Title()
 }
 
 // resendSelected re-issues the selected flow's request to its origin and adds
@@ -256,6 +307,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeChild()
 		m.sizeEditor()
 		m.sizeDetail()
+		if m.repeating {
+			m.sizeRepeater()
+		}
 		return m, nil
 
 	case ptyMsg:
@@ -273,21 +327,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.paused = msg.item.Flow
 		m.pausedMsg = msg.item.Msg
 		m.focus = focusTraffic
+		// Close any open text input. A paused flow is blocking a real client and
+		// the prompt below tells the user to press e/f/d — but a focused input
+		// would swallow those as literal text, and ':f' means filter, not
+		// forward. Whatever was half-typed matters less than the held request.
+		m = m.clearMotion()
+		m.cmdline, m.filtering = false, false
+		m.ci.Blur()
+		m.ci.SetValue("")
+		m.fi.Blur()
 		m.status = "PAUSED: [e]dit  [f]orward  [d]rop"
 		return m, waitPause(m.feeds.Pause)
 
 	case tea.MouseMsg:
 		return m.onMouse(msg)
 
+	case repeaterResultMsg:
+		m.rep.resp = msg.flow
+		if msg.err != nil {
+			m.rep.result = "error: " + msg.err.Error()
+		} else if msg.flow != nil && msg.flow.Response != nil {
+			m.rep.result = "sent · " + msg.flow.Response.Summary
+		}
+		m.rep.respVP.SetContent(renderRepeaterResponse(msg.flow, m.rep.respVP.Width))
+		m.rep.respVP.GotoTop()
+		return m, nil
+
+	case attackDoneMsg:
+		m.rep.result = fmt.Sprintf("attack complete · %d requests sent (see traffic list)", msg.count)
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.showHelp {
 			return m.onHelpKey(msg)
+		}
+		if m.repeating {
+			return m.onRepeaterKey(msg)
 		}
 		if m.editing {
 			return m.onEditKey(msg)
 		}
 		if m.filtering {
 			return m.onFilterKey(msg)
+		}
+		if m.cmdline {
+			return m.onCmdKey(msg)
 		}
 		if m.viewing {
 			return m.onViewKey(msg)
@@ -298,13 +382,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // onHelpKey handles keys while the help overlay is open: it is modal, so keys
-// don't fall through — esc/q/? close it, Ctrl+Q still quits.
+// don't fall through — esc/q/? close it, Ctrl+Q still quits. The body is far
+// taller than a terminal, so j/k/G/gg scroll it; without that the ':' command
+// section near the bottom would be unreachable.
 func (m Model) onHelpKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if k.Type == tea.KeyCtrlQ {
 		return m, tea.Quit
 	}
-	if k.Type == tea.KeyEsc || k.String() == "q" || k.String() == "?" {
+	max := m.maxHelpScroll(m.height)
+	switch {
+	case k.Type == tea.KeyEsc, k.String() == "q", k.String() == "?":
 		m.showHelp = false
+		return m, nil
+	case k.String() == "j", k.Type == tea.KeyDown:
+		m.helpScroll++
+	case k.String() == "k", k.Type == tea.KeyUp:
+		m.helpScroll--
+	case k.Type == tea.KeyPgDown, k.String() == "ctrl+f":
+		m.helpScroll += max/4 + 1
+	case k.Type == tea.KeyPgUp, k.String() == "ctrl+b":
+		m.helpScroll -= max/4 + 1
+	case k.String() == "G":
+		m.helpScroll = max
+	case k.String() == "g":
+		m.helpScroll = 0
+	}
+	if m.helpScroll > max {
+		m.helpScroll = max
+	}
+	if m.helpScroll < 0 {
+		m.helpScroll = 0
 	}
 	return m, nil
 }
@@ -334,18 +441,12 @@ func (m Model) onFilterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // onViewKey handles keys while the detail view is open: Esc/q closes it, and
 // everything else scrolls the viewport.
 func (m Model) onViewKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.Type {
-	case tea.KeyEsc:
+	switch m.km().Action(ctxDetail, k.String()) {
+	case ActDetailClose:
 		m.viewing = false
 		m.viewFlow = nil
 		return m, nil
-	}
-	switch k.String() {
-	case "q":
-		m.viewing = false
-		m.viewFlow = nil
-		return m, nil
-	case "s":
+	case ActDetailSave:
 		m.status = m.exportViewedFlow()
 		return m, nil
 	}
@@ -355,7 +456,7 @@ func (m Model) onViewKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) sizeDetail() {
-	m.vp.Width = m.width/2 - 4
+	m.vp.Width = m.rightPaneWidth() - 3
 	m.vp.Height = m.height - 5
 }
 
@@ -373,15 +474,20 @@ func (m *Model) openDetail() {
 
 func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Leader dispatch: if the previous key was the leader, this key is a command.
+	// A half-typed motion is abandoned on the way out of the traffic pane: it
+	// belongs to that pane, and a count left pending across a leader sequence or
+	// a spell in the terminal would silently multiply some later j.
 	if m.pendingLeader {
-		return m.leaderCommand(k)
+		return m.clearMotion().leaderCommand(k)
 	}
-	if k.Type == m.leader.Key {
+	if k.Type == m.km().Leader {
+		m = m.clearMotion()
 		m.pendingLeader = true
 		return m, nil
 	}
 
 	if m.focus == focusTerminal {
+		m = m.clearMotion()
 		// Forward the keystroke to the child PTY verbatim.
 		if b := keyBytes(k); b != nil && m.target != nil {
 			m.target.Pty.Write(b)
@@ -391,56 +497,109 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Traffic pane. Interception toggles also live here as plain letters because
 	// this pane never forwards keystrokes to the target.
-	switch k.String() {
-	case "i":
+	key := k.String()
+	act := m.km().Action(ctxTraffic, key)
+
+	// vim-style numeric prefix and gg/G motions (spike, #9): only for keys the
+	// keymap doesn't claim (user bindings always win) and only in the traffic
+	// pane, so counts/motions never reach a target that might itself be vim.
+	if act == "" && !m.km().claims(ctxTraffic, key) {
+		if n, ok := digit(key); ok && (n > 0 || m.count > 0) {
+			m.count = m.count*10 + n
+			if m.count > 100000 {
+				m.count = 100000
+			}
+			return m, nil
+		}
+		switch key {
+		case "g": // gg → first flow, or row {count} — vim's 5gg is line 5
+			if !m.pendingG {
+				m.pendingG = true
+				return m, nil
+			}
+			n := len(m.visible())
+			target := 0
+			if m.count > 0 {
+				target = clampIndex(m.count-1, n)
+			}
+			m.selected = target
+			return m.clearMotion(), nil
+		case "G": // jump to the last flow, or to row {count}
+			n := len(m.visible())
+			target := n - 1
+			if m.count > 0 {
+				target = clampIndex(m.count-1, n)
+			}
+			if target < 0 {
+				target = 0
+			}
+			m.selected = target
+			return m.clearMotion(), nil
+		}
+	}
+	m.pendingG = false
+	count := m.count
+	if count < 1 {
+		count = 1
+	}
+	m.count = 0
+
+	switch act {
+	case ActInterceptRequests:
 		m.engine.SetEnabled(!m.engine.Enabled())
-	case "r":
+	case ActInterceptResponses:
 		m.engine.SetInterceptResponses(!m.engine.InterceptResponses())
-	case "up", "k":
-		if m.selected > 0 {
-			m.selected--
-		}
-	case "down", "j":
-		if m.selected < len(m.visible())-1 {
-			m.selected++
-		}
-	case "/":
+	case ActFlowPrev:
+		m.selected = clampIndex(m.selected-count, len(m.visible()))
+	case ActFlowNext:
+		m.selected = clampIndex(m.selected+count, len(m.visible()))
+	case ActHostNext:
+		m.selected = hostJump(m.visible(), m.selected, +1, count)
+	case ActHostPrev:
+		m.selected = hostJump(m.visible(), m.selected, -1, count)
+	case ActCommand:
+		m.cmdline = true
+		m.ci.Focus()
+	case ActFilterOpen:
 		m.filtering = true
 		m.fi.Focus()
-	case " ":
-		if f := m.selectedFlow(); f != nil {
-			f.Flagged = !f.Flagged
-		}
-	case "F":
+	case ActFlowFlag:
+		m.status = m.toggleSelectedFlag()
+	case ActFlaggedOnly:
 		m.flaggedOnly = !m.flaggedOnly
 		m.selected = clampIndex(m.selected, len(m.visible()))
-	case "c":
+	case ActSortCycle:
+		m.sort = (m.sort + 1) % 3
+		m.selected = clampIndex(m.selected, len(m.visible()))
+	case ActExportCurl:
 		m.status = m.exportCurlSelected()
-	case "e":
+	case ActPausedEdit:
 		if m.paused != nil {
 			m.enterEdit()
 		}
-	case "f":
+	case ActPausedFwd:
 		if m.paused != nil {
 			m.engine.Resolve(m.paused.ID, intercept.Resolution{Decision: intercept.Forward})
 			m.clearPause()
 			m.status = "forwarded"
 		}
-	case "d":
+	case ActPausedDrop:
 		if m.paused != nil {
 			m.engine.Resolve(m.paused.ID, intercept.Resolution{Decision: intercept.Drop})
 			m.clearPause()
 			m.status = "dropped"
 		}
-	case "?":
-		m.showHelp = true
-	case "x":
+	case ActHelpToggle:
+		m.showHelp, m.helpScroll = true, 0
+	case ActRepeaterNew:
+		m.openRepeater()
+	case ActFlowResend:
 		m.status = m.resendSelected()
-	case "enter":
+	case ActDetailOpen:
 		m.openDetail()
-	case "n":
+	case ActInjectOut:
 		m.enterInject(capture.ClientToServer)
-	case "N":
+	case ActInjectIn:
 		m.enterInject(capture.ServerToClient)
 	}
 	return m, nil
@@ -489,36 +648,42 @@ func (m *Model) doInject() string {
 func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.pendingLeader = false
 
-	if k.Type == m.leader.Key {
+	if k.Type == m.km().Leader {
 		if m.focus == focusTerminal && m.target != nil {
-			m.target.Pty.Write([]byte{m.leader.Byte})
+			// KeyType 1-26 is the ASCII control code, so this is the literal
+			// leader byte whichever ctrl key is configured.
+			m.target.Pty.Write([]byte{byte(m.km().Leader)})
 		}
 		return m, nil
 	}
 
-	switch k.String() {
-	case "w":
+	switch m.km().Action(ctxLeader, k.String()) {
+	case ActPaneSwitch:
 		if m.focus == focusTerminal {
 			m.focus = focusTraffic
 		} else {
 			m.focus = focusTerminal
 		}
-	case "q":
+	case ActQuit:
 		return m, tea.Quit
-	case "i":
+	case ActInterceptRequests:
 		m.engine.SetEnabled(!m.engine.Enabled())
-	case "r":
+	case ActInterceptResponses:
 		m.engine.SetInterceptResponses(!m.engine.InterceptResponses())
-	case "s":
+	case ActSessionSave:
 		m.status = m.saveSession()
-	case "h":
+	case ActExportHAR:
 		m.status = m.exportHAR()
-	case "f":
+	case ActExportFlagged:
 		m.status = m.exportFlagged()
-	case "m":
+	case ActSplitShrink:
+		m.adjustSplit(-splitStep)
+	case ActSplitGrow:
+		m.adjustSplit(splitStep)
+	case ActMouseCapture:
 		return m.toggleMouseCapture()
-	case "?":
-		m.showHelp = !m.showHelp
+	case ActHelpToggle:
+		m.showHelp, m.helpScroll = !m.showHelp, 0
 	}
 	return m, nil
 }
@@ -532,10 +697,10 @@ func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) toggleMouseCapture() (tea.Model, tea.Cmd) {
 	m.mouseCapture = !m.mouseCapture
 	if m.mouseCapture {
-		m.status = fmt.Sprintf("mouse capture ON — %s m to turn it off for native text selection", m.leader.Name)
+		m.status = fmt.Sprintf("mouse capture ON — %s m to turn it off for native text selection", m.km().LeaderName)
 		return m, tea.EnableMouseCellMotion
 	}
-	m.status = fmt.Sprintf("mouse capture OFF (native selection works) — %s m to turn it back on", m.leader.Name)
+	m.status = fmt.Sprintf("mouse capture OFF (native selection works) — %s m to turn it back on", m.km().LeaderName)
 	return m, tea.DisableMouse
 }
 
@@ -543,10 +708,10 @@ func (m Model) toggleMouseCapture() (tea.Model, tea.Cmd) {
 // edited bytes, Ctrl+L fixes the HTTP Content-Length, Esc cancels back to the
 // forward/drop prompt, and everything else is typing into the textarea.
 func (m Model) onEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.Type {
-	case tea.KeyCtrlQ:
+	switch m.km().Action(ctxEditor, k.String()) {
+	case ActQuit:
 		return m, tea.Quit
-	case tea.KeyCtrlS:
+	case ActEditorSend:
 		if m.injecting {
 			status := m.doInject()
 			m.editing = false
@@ -564,13 +729,13 @@ func (m Model) onEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "forwarded (edited)"
 		}
 		return m, nil
-	case tea.KeyCtrlL:
+	case ActEditorFixLen:
 		if !m.injecting {
 			m.ta.SetValue(fixContentLength(m.ta.Value()))
 			m.status = "fixed Content-Length"
 		}
 		return m, nil
-	case tea.KeyEsc:
+	case ActEditorCancel:
 		m.editing = false
 		m.injecting = false
 		m.ta.Blur()
@@ -607,16 +772,74 @@ func (m *Model) clearPause() {
 }
 
 func (m *Model) sizeEditor() {
-	m.ta.SetWidth(m.width/2 - 4)
+	m.ta.SetWidth(m.rightPaneWidth() - 3)
 	m.ta.SetHeight(m.height - 6)
+}
+
+// paneBoxWidths returns the on-screen widths of the two pane boxes, border
+// included, split by splitRatio and summing to EXACTLY m.width. lipgloss draws
+// a border column on both sides of both panes — four columns in all — so the
+// two boxes, not their content, are what must fit m.width. Charging only two
+// border columns (the old leftPaneWidth + rightPaneWidth == m.width-2) made the
+// joined row m.width+2 wide, wrapping every pane line and sliding the layout —
+// and every mouse row — down the screen. mouse hit-testing (paneRects) reads
+// the same split, so clicks land on the row actually drawn.
+func (m Model) paneBoxWidths() (left, right int) {
+	left = int(float64(m.width) * m.splitRatio)
+	// Keep a border plus at least one content column in each pane at any
+	// ratio/width, so neither box collapses into its own borders.
+	if left < 3 {
+		left = 3
+	}
+	if left > m.width-3 {
+		left = m.width - 3
+	}
+	return left, m.width - left
+}
+
+// leftPaneWidth is the content width handed to lipgloss .Width() for the left
+// pane; the border adds one column on each side, so the box is leftPaneWidth+2.
+// At a 0.5 ratio on an even width this is m.width/2 - 2.
+func (m Model) leftPaneWidth() int {
+	l, _ := m.paneBoxWidths()
+	return l - 2
+}
+
+// rightPaneWidth is the content width for the right pane. leftPaneWidth and
+// rightPaneWidth each map to a box of width value+2, and the two boxes sum to
+// exactly m.width, so the joined row never overflows the terminal.
+func (m Model) rightPaneWidth() int {
+	_, r := m.paneBoxWidths()
+	return r - 2
 }
 
 // leftSize is the terminal grid size for the left pane's content area. The PTY,
 // the emulator, and the render call must all use it so the target draws for the
 // exact grid we display.
 func (m Model) leftSize() (cols, rows int) {
-	left, _ := m.paneRects()
-	return contentGrid(left)
+	paneW := m.leftPaneWidth()
+	paneH := m.height - 3
+	return paneW - 2, paneH - 1
+}
+
+// adjustSplit nudges the split ratio by delta, clamped to [minSplit, maxSplit],
+// and re-sizes the target PTY/emulator and the right-pane overlays so everything
+// redraws at the new widths.
+func (m *Model) adjustSplit(delta float64) {
+	r := m.splitRatio + delta
+	if r < minSplit {
+		r = minSplit
+	}
+	if r > maxSplit {
+		r = maxSplit
+	}
+	if r == m.splitRatio {
+		return
+	}
+	m.splitRatio = r
+	m.resizeChild()
+	m.sizeEditor()
+	m.sizeDetail()
 }
 
 func (m *Model) resizeChild() {
@@ -637,30 +860,31 @@ func (m Model) View() string {
 		return "starting…"
 	}
 	if m.showHelp {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			m.helpViewAt(m.height, m.helpScroll))
 	}
-	leftBox, rightBox := m.paneRects()
-	// Each pane is sized from its OWN box: an odd terminal width makes the two
-	// boxes differ by a column, and sizing both from the left one would push
-	// the row back over m.width — the overflow paneRects exists to prevent.
-	// Width/Height take the content size; lipgloss adds the border outside it.
+	if m.repeating {
+		return m.repeaterView()
+	}
+	leftW := m.leftPaneWidth()
+	rightW := m.rightPaneWidth()
+	paneH := m.height - 3
 
-	lw, lh := contentGrid(leftBox)
-	leftPane := paneStyle(m.focus == focusTerminal).Width(leftBox.W - 2).Height(leftBox.H - 2).
+	lw, lh := m.leftSize()
+	left := paneStyle(m.focus == focusTerminal).Width(leftW).Height(paneH).
 		Render(m.screen.Render(lw, lh))
 
-	rw, rh := contentGrid(rightBox)
-	rightContent := m.renderTraffic(rw, rh)
+	rightContent := m.renderTraffic(rightW-2, paneH-1)
 	switch {
 	case m.editing:
 		rightContent = m.renderEditor()
 	case m.viewing:
 		rightContent = m.renderDetail()
 	}
-	rightPane := paneStyle(m.focus == focusTraffic).Width(rightBox.W - 2).Height(rightBox.H - 2).
+	right := paneStyle(m.focus == focusTraffic).Width(rightW).Height(paneH).
 		Render(rightContent)
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	bar := statusBar(m.width, m.status, m.engine.Enabled(), m.engine.InterceptResponses())
 	return body + "\n" + bar
 }
@@ -674,7 +898,16 @@ func (m Model) renderTraffic(w, h int) string {
 		header = fmt.Sprintf("Traffic (%d/%d)", len(vis), len(m.flows))
 	}
 	if m.flaggedOnly {
-		header += " ⚑only"
+		header += " " + glyphFlag + "only"
+	}
+	if m.sort != sortNone {
+		header += " ↕" + m.sort.String()
+	}
+	// Pending vim motion (a count like "12" or a lone "g" awaiting the second).
+	if m.count > 0 {
+		header += fmt.Sprintf("  %d", m.count)
+	} else if m.pendingG {
+		header += "  g"
 	}
 	b.WriteString(titleStyle.Render(header) + "\n")
 
@@ -686,7 +919,10 @@ func (m Model) renderTraffic(w, h int) string {
 	if filterLineShown {
 		b.WriteString(truncate(m.fi.View(), w) + "\n")
 	}
-	_, listRows := trafficRowLayout(h, filterLineShown, m.paused != nil)
+	if m.cmdline {
+		b.WriteString(truncate(m.ci.View(), w) + "\n")
+	}
+	_, listRows := trafficRowLayout(h, filterLineShown, m.cmdline, m.paused != nil)
 
 	// Slide the window so the selection stays visible (the missing scroll).
 	sel := clampIndex(m.selected, len(vis))
@@ -695,25 +931,11 @@ func (m Model) renderTraffic(w, h int) string {
 		start = sel - listRows + 1
 	}
 	for i := start; i < len(vis) && i < start+listRows; i++ {
-		f := vis[i]
-		mark := " "
-		if f.Flagged {
-			mark = "⚑"
-		}
-		line := truncate(fmt.Sprintf("%s %-7s %s", mark, f.Status, f.Title()), w)
-		switch {
-		case i == sel:
-			line = selectedStyle.Render(line)
-		case f.Flagged:
-			line = flagStyle.Render(line)
-		case f.Status == capture.StatusPending:
-			line = pendingStyle.Render(line)
-		}
-		b.WriteString(line + "\n")
+		b.WriteString(m.renderFlowRow(vis[i], i == sel, w) + "\n")
 	}
 
 	if m.paused != nil {
-		b.WriteString("\n" + pendingStyle.Render("▶ "+m.paused.Title()))
+		b.WriteString("\n" + pendingStyle.Render(glyphPointer+" "+m.paused.Title()))
 		b.WriteString("\n[e]dit  [f]orward  [d]rop")
 	}
 	return b.String()
@@ -736,7 +958,7 @@ func clampIndex(i, n int) int {
 func (m Model) renderDetail() string {
 	title := "Detail"
 	if m.viewFlow != nil {
-		title = "Detail ▸ " + m.viewFlow.Title()
+		title = "Detail " + glyphArrow + " " + m.viewFlow.Title()
 	}
 	return titleStyle.Render(truncate(title, m.vp.Width)) + "\n" + m.vp.View() + "\n" + "[esc] back · j/k scroll · s save to txt"
 }
@@ -746,7 +968,7 @@ func (m Model) renderEditorTitle() string {
 		return "Inject WS frame (" + m.injectDir.String() + ")"
 	}
 	if m.paused != nil {
-		return "Edit ▶ " + m.paused.Title()
+		return "Edit " + glyphPointer + " " + m.paused.Title()
 	}
 	return "Edit request"
 }
@@ -755,12 +977,19 @@ func (m Model) renderEditor() string {
 	return titleStyle.Render(m.renderEditorTitle()) + "\n" + m.ta.View()
 }
 
+// truncate bounds s to n columns, counting runes rather than bytes: slicing a
+// byte offset can land inside a multibyte rune and emit invalid UTF-8, which a
+// terminal renders as a replacement glyph.
 func truncate(s string, n int) string {
-	if n <= 0 || len(s) <= n {
+	if n <= 0 {
 		return s
 	}
-	if n <= 1 {
-		return s[:n]
+	r := []rune(s)
+	if len(r) <= n {
+		return s
 	}
-	return s[:n-1] + "…"
+	if n == 1 {
+		return string(r[:1])
+	}
+	return string(r[:n-1]) + "…"
 }

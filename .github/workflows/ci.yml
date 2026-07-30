@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Decides whether the change set can affect the built binary. Kept as a
+  # separate job rather than a `paths-ignore:` trigger so that `build-test`
+  # always reports a status: a workflow that never starts leaves a required
+  # check pending forever, while a skipped job counts as passing.
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether a build is needed
+        id: filter
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          build="$(.github/scripts/needs-build.sh "$BASE_SHA" "$HEAD_SHA")"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  build-test:
+    name: build-test
+    needs: changes
+    # Only an explicit "false" skips the build: if the detect job itself breaks,
+    # its output is empty and the build runs anyway. A broken filter must never
+    # be the reason a change merged untested.
+    if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...

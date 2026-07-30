@@ -18,7 +18,7 @@ import (
 // an off-by-one split shows up.
 func TestPaneBoxesExactlyFillTheWidth(t *testing.T) {
 	for _, w := range []int{40, 41, 80, 81, 100, 120, 121, 200, 201} {
-		m := Model{width: w, height: 40}
+		m := Model{width: w, height: 40, splitRatio: 0.5}
 		left, right := m.paneRects()
 
 		if got := left.W + right.W; got != w {
@@ -39,7 +39,7 @@ func TestPaneBoxesExactlyFillTheWidth(t *testing.T) {
 // renderer, so this asserts against rendered cell width, not our own maths.
 func TestRenderedRowNeverExceedsTerminalWidth(t *testing.T) {
 	for _, w := range []int{40, 41, 80, 81, 120, 121, 200} {
-		m := Model{width: w, height: 20}
+		m := Model{width: w, height: 20, splitRatio: 0.5}
 		leftBox, rightBox := m.paneRects()
 
 		left := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
@@ -67,7 +67,7 @@ func TestRenderedRowNeverExceedsTerminalWidth(t *testing.T) {
 func TestClickOnSelectedRowOpensDetail(t *testing.T) {
 	newModel := func() Model {
 		return Model{
-			width: 100, height: 40,
+			width: 100, height: 40, splitRatio: 0.5,
 			fi: newFilter(), vp: viewport.New(0, 0),
 			flows: newFlows(3), selected: 0,
 		}
@@ -116,7 +116,7 @@ func TestClickOnSelectedRowOpensDetail(t *testing.T) {
 // TestClickFocusesThePaneItLandsIn covers the other half of the report: a click
 // must move keyboard focus, not just the mouse's notion of a target.
 func TestClickFocusesThePaneItLandsIn(t *testing.T) {
-	m := Model{width: 100, height: 40, fi: newFilter(), vp: viewport.New(0, 0), flows: newFlows(3)}
+	m := Model{width: 100, height: 40, splitRatio: 0.5, fi: newFilter(), vp: viewport.New(0, 0), flows: newFlows(3)}
 	left, right := m.paneRects()
 
 	m.focus = focusTerminal

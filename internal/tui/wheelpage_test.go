@@ -40,7 +40,7 @@ func leftPaneHarness(t *testing.T) (Model, *os.File, *recordingEmulator) {
 	})
 	emu := &recordingEmulator{}
 	m := Model{
-		width: 100, height: 40,
+		width: 100, height: 40, splitRatio: 0.5,
 		fi: newFilter(), vp: viewport.New(0, 0),
 		target: &runner.Target{Pty: w},
 	}
@@ -157,7 +157,7 @@ func TestNonWheelMouseStillForwards(t *testing.T) {
 // started — the shape several existing tests construct.
 func TestWheelWithNoPtyDoesNotPanic(t *testing.T) {
 	m := Model{
-		width: 100, height: 40,
+		width: 100, height: 40, splitRatio: 0.5,
 		fi: newFilter(), vp: viewport.New(0, 0),
 		target: &runner.Target{}, // Pty is nil
 		screen: &recordingEmulator{},

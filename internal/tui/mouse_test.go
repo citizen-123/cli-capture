@@ -54,7 +54,7 @@ func TestPaneRectsAdjoinAndMatchContentGrid(t *testing.T) {
 		{100, 40}, {81, 24}, {60, 20}, {200, 60}, {40, 10},
 	}
 	for _, sz := range sizes {
-		m := Model{width: sz.width, height: sz.height}
+		m := Model{width: sz.width, height: sz.height, splitRatio: 0.5}
 		left, right := m.paneRects()
 		if right.X != left.X+left.W {
 			t.Errorf("width=%d height=%d: right pane doesn't start where left ends (left=%+v right=%+v)",
@@ -107,7 +107,7 @@ func TestFlowRowIndex(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			idx, ok := flowRowIndex(tc.y, tc.h, tc.nVis, tc.selected, tc.filterLineShown, tc.pausedShown)
+			idx, ok := flowRowIndex(tc.y, tc.h, tc.nVis, tc.selected, tc.filterLineShown, false, tc.pausedShown)
 			if ok != tc.wantOK || (ok && idx != tc.wantIdx) {
 				t.Errorf("flowRowIndex(y=%d,h=%d,nVis=%d,selected=%d,filter=%v,paused=%v) = (%d,%v), want (%d,%v)",
 					tc.y, tc.h, tc.nVis, tc.selected, tc.filterLineShown, tc.pausedShown, idx, ok, tc.wantIdx, tc.wantOK)
@@ -126,12 +126,13 @@ func TestFlowRowIndex(t *testing.T) {
 func TestOnLeftPaneMouseForwardsTranslatedCoordinates(t *testing.T) {
 	screen := &fakeEmulator{}
 	m := Model{
-		width:  100,
-		height: 40,
-		fi:     newFilter(),
-		vp:     viewport.New(0, 0),
-		screen: screen,
-		target: &runner.Target{},
+		width:      100,
+		height:     40,
+		splitRatio: 0.5,
+		fi:         newFilter(),
+		vp:         viewport.New(0, 0),
+		screen:     screen,
+		target:     &runner.Target{},
 	}
 	left, _ := m.paneRects()
 	ev := tea.MouseMsg{X: left.X + 2, Y: left.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
@@ -159,12 +160,13 @@ func TestOnLeftPaneMouseForwardsTranslatedCoordinates(t *testing.T) {
 func TestOnLeftPaneMouseBorderClickDoesNotForward(t *testing.T) {
 	screen := &fakeEmulator{}
 	m := Model{
-		width:  100,
-		height: 40,
-		fi:     newFilter(),
-		vp:     viewport.New(0, 0),
-		screen: screen,
-		target: &runner.Target{},
+		width:      100,
+		height:     40,
+		splitRatio: 0.5,
+		fi:         newFilter(),
+		vp:         viewport.New(0, 0),
+		screen:     screen,
+		target:     &runner.Target{},
 	}
 	left, _ := m.paneRects()
 	ev := tea.MouseMsg{X: left.X, Y: left.Y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft} // top-left border cell
@@ -182,7 +184,7 @@ func TestOnLeftPaneMouseBorderClickDoesNotForward(t *testing.T) {
 // terminal pane can be clicked before a child has been wired up (or after it
 // exits), and that must never crash the TUI.
 func TestOnLeftPaneMouseNilTargetDoesNotPanic(t *testing.T) {
-	m := Model{width: 100, height: 40, fi: newFilter(), vp: viewport.New(0, 0)}
+	m := Model{width: 100, height: 40, splitRatio: 0.5, fi: newFilter(), vp: viewport.New(0, 0)}
 	left, _ := m.paneRects()
 	ev := tea.MouseMsg{X: left.X + 2, Y: left.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
 
@@ -197,7 +199,7 @@ func TestOnLeftPaneMouseNilTargetDoesNotPanic(t *testing.T) {
 // TestOnMouseRightPaneClickSelectsRow checks a click maps to the flow under
 // the cursor using the exact same row accounting renderTraffic draws with.
 func TestOnMouseRightPaneClickSelectsRow(t *testing.T) {
-	m := Model{width: 100, height: 40, fi: newFilter(), vp: viewport.New(0, 0), flows: newFlows(5)}
+	m := Model{width: 100, height: 40, splitRatio: 0.5, fi: newFilter(), vp: viewport.New(0, 0), flows: newFlows(5)}
 	_, right := m.paneRects()
 
 	const wantIdx = 2
@@ -227,7 +229,7 @@ func TestOnMouseRightPaneClickSelectsRow(t *testing.T) {
 // "clicking past the end of the list" requirement: no panic, no selection
 // change.
 func TestOnMouseRightPaneClickPastEndDoesNotPanicOrSelect(t *testing.T) {
-	m := Model{width: 100, height: 40, fi: newFilter(), vp: viewport.New(0, 0), flows: newFlows(2), selected: 0}
+	m := Model{width: 100, height: 40, splitRatio: 0.5, fi: newFilter(), vp: viewport.New(0, 0), flows: newFlows(2), selected: 0}
 	_, right := m.paneRects()
 	_, rows := contentGrid(right)
 
@@ -247,7 +249,7 @@ func TestOnMouseRightPaneClickPastEndDoesNotPanicOrSelect(t *testing.T) {
 // --- right pane: wheel ---
 
 func TestOnMouseRightPaneWheelMovesSelectionClamped(t *testing.T) {
-	m := Model{width: 100, height: 40, fi: newFilter(), vp: viewport.New(0, 0), flows: newFlows(3), selected: 0}
+	m := Model{width: 100, height: 40, splitRatio: 0.5, fi: newFilter(), vp: viewport.New(0, 0), flows: newFlows(3), selected: 0}
 	_, right := m.paneRects()
 	wheel := func(btn tea.MouseButton) tea.MouseMsg {
 		return tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: btn}
@@ -277,7 +279,7 @@ func TestOnMouseRightPaneWheelMovesSelectionClamped(t *testing.T) {
 func TestOnMouseRightPaneWheelScrollsViewportWhenViewing(t *testing.T) {
 	vp := viewport.New(10, 3)
 	vp.SetContent(strings.Join([]string{"l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8"}, "\n"))
-	m := Model{width: 100, height: 40, fi: newFilter(), vp: vp, viewing: true, flows: newFlows(3), selected: 0}
+	m := Model{width: 100, height: 40, splitRatio: 0.5, fi: newFilter(), vp: vp, viewing: true, flows: newFlows(3), selected: 0}
 	_, right := m.paneRects()
 	ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
 

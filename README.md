@@ -23,6 +23,14 @@ export.
  ? for help · Ctrl+A w switch pane · Ctrl+A i arm intercept · Ctrl+A q quit
 ```
 
+**📸 See the [visual tour](docs/screenshots.md)** for a screenshot of every feature,
+or the **[docs](docs/)** for the guides: [getting started](docs/getting-started.md) ·
+[keybindings](docs/keybindings.md) · [scope](docs/scope.md) ·
+[intercepting](docs/intercepting.md) · [repeater](docs/repeater.md) ·
+[exporting](docs/exporting.md).
+
+![cli-capture split-pane monitor](docs/img/01-overview-split-pane.png)
+
 ---
 
 ## What it's for
@@ -67,7 +75,48 @@ Use it to:
 
 ## Install
 
-Requires **Go 1.26+**. Clone and build:
+### Homebrew (macOS / Linux)
+
+```bash
+brew install citizen-123/tap/cli-capture
+```
+
+Or tap first, then install:
+
+```bash
+brew tap citizen-123/tap
+brew install cli-capture
+```
+
+Upgrade later with `brew upgrade cli-capture`.
+
+### With `go install`
+
+Requires **Go 1.26+**. Installs the `cli-capture` binary into `$(go env GOBIN)`
+(or `$(go env GOPATH)/bin`):
+
+```bash
+go install github.com/citizen-123/cli-capture/cmd/cli-capture@latest
+```
+
+Make sure that directory is on your `PATH`, then run `cli-capture -version` to
+confirm.
+
+### Prebuilt release binaries
+
+Grab a tarball/zip for your OS and architecture from the
+[Releases page](https://github.com/citizen-123/cli-capture/releases) (linux,
+macOS, and Windows on amd64/arm64), verify it against `checksums.txt`, and drop
+the binary on your `PATH`:
+
+```bash
+# example: Linux amd64
+tar -xzf cli-capture_*_linux_amd64.tar.gz
+install -m755 cli-capture ~/.local/bin/
+cli-capture -version
+```
+
+### From source
 
 ```bash
 git clone https://github.com/citizen-123/cli-capture
@@ -125,7 +174,9 @@ Everything after `--` is the target program to launch and monitor.
 | Flag | Default | Description |
 |---|---|---|
 | `-listen <addr>` | `127.0.0.1:0` | Proxy listen address. `:0` picks a free port. |
-| `-dir <path>` | `~/.cli-capture` | Config / CA directory (also where sessions and exports are written). |
+| `-dir <path>` | `~/.cli-capture` | Data directory: CA, sessions, exports, log. |
+| `-config <files>` | `~/.config/cli-capture/config.json` | Config file(s) or preset name(s); repeatable and comma-separated, merged in order. See [docs/configuration.md](docs/configuration.md). |
+| `-theme <name>` | `dark` | `dark`, `light`, `high-contrast`, or `none`. Overrides the config file. |
 | `-scope <specs>` | *(all)* | Comma-separated specs for **which flows to intercept**. Default intercepts everything (once armed). |
 | `-exclude <specs>` | — | Comma-separated specs to **never** intercept; wins over `-scope`. |
 | `-last-match` | off | Evaluate all scope rules and take the last match instead of the first. |
@@ -154,8 +205,8 @@ Examples:
 # intercept only GitHub's API, minus a noisy endpoint
 ./cli-capture -scope '*.github.com' -exclude 'path:/telemetry' -- gh pr list
 
-# intercept every POST that carries a token, anywhere
-./cli-capture -scope 'method:=POST' -scope 'body:token' -- some-cli
+# pause every POST, and anything carrying a token in its body
+./cli-capture -scope 'method:=POST,body:token' -- some-cli
 
 # monitor everything, but never decrypt the bank
 ./cli-capture -no-mitm '*.bank.example' -- some-cli
@@ -163,37 +214,42 @@ Examples:
 
 Postures fall out of the defaults: give `-scope` and you get an **allowlist**
 (intercept only those); give only `-exclude` and you get a **denylist**
-(intercept everything except those).
+(intercept everything except those). Specs within one flag are OR'd, and a flag
+given twice keeps only the last value — see [docs/scope.md](docs/scope.md).
 
 ---
 
 ## Keybindings
 
-Keys use a **tmux-style leader (`Ctrl+A` by default)** so the terminal pane keeps
-all of its own keys — only the leader is intercepted (press it twice to send a
-literal leader byte to the target). Press **`?`** for the in-app help overlay.
+Keys use a **tmux-style leader (`Ctrl+A`)** so the terminal pane keeps all of its
+own keys — only the leader is intercepted (press it twice to send a literal
+`Ctrl+A` to the target). Press **`?`** for the in-app help overlay. The leader
+and every binding below are configurable — see
+[docs/configuration.md](docs/configuration.md).
 
 If your target app wants `Ctrl+A` — readline's beginning-of-line, or tmux itself
-— move the leader instead of fighting it:
-
-```bash
-cli-capture -leader ctrl+space -- claude
-```
-
-Accepts `ctrl+a` … `ctrl+z` and `ctrl+space`. The help overlay and status bar
-follow whatever you pick, and the rebound key is released back to the target.
+— move the leader instead of fighting it. Set `keys.leader` in your config to any
+`ctrl+a` … `ctrl+z`; the help overlay follows whatever you pick, and the rebound
+key is released back to the target.
 
 **Global — leader then:**
 
 | Key | Action |
 |---|---|
 | `w` | switch pane (terminal ⇄ traffic) |
+| `<` / `>` | shrink / grow the terminal pane |
 | `i` / `r` | toggle intercept: requests / responses |
 | `s` | save session to JSON |
 | `h` | export session as HAR |
 | `f` | export flagged flows → `flagged.txt` |
+| `m` | toggle mouse capture (off restores native text selection) |
 | `?` | toggle help |
 | `q` | quit |
+
+With mouse capture on (the default), clicks move pane focus and select flows —
+clicking the already-selected flow opens it — and the wheel scrolls the traffic
+list or pages the hosted app. Toggle it off (`leader m`) to use your terminal's
+own text selection and copy-paste.
 
 **Traffic pane** (plain keys — it never forwards to the target):
 
@@ -202,6 +258,7 @@ follow whatever you pick, and the rebound key is released back to the target.
 | `j` / `k` | move selection (list scrolls to follow) |
 | `space` | flag / unflag the selected flow |
 | `F` | show flagged only |
+| `o` | cycle sort: none / status / size (surfaces attack outliers) |
 | `/` | filter by host / method / path / status |
 | `enter` | open the detail view |
 | `e` / `f` / `d` | on a **PAUSED** flow: edit / forward / drop |
@@ -209,6 +266,13 @@ follow whatever you pick, and the rebound key is released back to the target.
 | `c` | export the selected flow as a curl command |
 | `n` / `N` | inject a WebSocket frame (client→server / server→client) |
 | `?` | toggle help |
+
+Each row shows the HTTP **status code** (colored by class) and **response size**,
+so you can triage at a glance; attack results also show the payload that produced
+them, and `o` sorts by status or size to surface the outlier.
+
+**Repeater** (`R`): the response is shown **inline** — `Tab` cycles request →
+payloads → response, `Ctrl+O` cycles attack mode, `Ctrl+S` sends.
 
 **Detail view** (`enter`): `j`/`k` scroll · `s` save this flow to `.txt` ·
 `esc`/`q` back.

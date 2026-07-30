@@ -19,23 +19,16 @@ func (r rect) contains(x, y int) bool {
 }
 
 // paneRects returns the on-screen bounding boxes — lipgloss border included —
-// for the left and right panes, using the exact expressions View() lays them
-// out with (paneStyle().Width/Height, then lipgloss.JoinHorizontal). Both
-// View() and mouse hit-testing call this instead of each keeping their own
-// copy of the geometry, so they can't drift apart.
-// The two boxes must sum to EXACTLY m.width. Sizing by content and adding the
-// border afterwards (the old `m.width/2 - 1`, then +2 per pane) produced a row
-// m.width+2 wide: lipgloss puts a border column on each side of each pane, so
-// two panes cost four border columns, not two. The terminal then wrapped every
-// pane line, which pushed the layout down the screen and left mouse Y
-// coordinates pointing at rows other than the ones actually drawn.
+// for the left and right panes. Both View() (via paneBoxWidths → leftPaneWidth
+// / rightPaneWidth) and mouse hit-testing derive their geometry from the same
+// paneBoxWidths split, so a click always maps to the row actually drawn — and
+// the two boxes sum to exactly m.width, at whatever splitRatio the operator has
+// dragged the divider to.
 func (m Model) paneRects() (left, right rect) {
 	boxH := m.height - 1 // the status bar owns the last row
-	leftW := m.width / 2
-	// An odd terminal width can't split evenly; give the spare column to the
-	// right pane rather than letting the pair overflow by one.
-	left = rect{X: 0, Y: 0, W: leftW, H: boxH}
-	right = rect{X: leftW, Y: 0, W: m.width - leftW, H: boxH}
+	leftBox, rightBox := m.paneBoxWidths()
+	left = rect{X: 0, Y: 0, W: leftBox, H: boxH}
+	right = rect{X: leftBox, Y: 0, W: rightBox, H: boxH}
 	return left, right
 }
 
@@ -239,14 +232,19 @@ func (m Model) onRightPaneWheel(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 // trafficRowLayout mirrors renderTraffic's row accounting: how many rows sit
-// above the scrollable flow list (the header, plus the filter line when it's
-// shown) and how many rows the list itself gets once the header/filter/paused
-// prompt have taken their share of h. renderTraffic and clickedFlowIndex both
-// call this so the two can't disagree about where a row lands on screen.
-func trafficRowLayout(h int, filterLineShown, pausedShown bool) (listTop, listRows int) {
+// above the scrollable flow list (the header, plus the filter line and the ':'
+// command line when either is shown) and how many rows the list itself gets
+// once the header/filter/cmdline/paused prompt have taken their share of h.
+// renderTraffic and clickedFlowIndex both call this so the two can't disagree
+// about where a row lands on screen.
+func trafficRowLayout(h int, filterLineShown, cmdlineShown, pausedShown bool) (listTop, listRows int) {
 	listTop = 1 // header
 	reserved := 1
 	if filterLineShown {
+		listTop++
+		reserved++
+	}
+	if cmdlineShown {
 		listTop++
 		reserved++
 	}
@@ -263,10 +261,10 @@ func trafficRowLayout(h int, filterLineShown, pausedShown bool) (listTop, listRo
 // flowRowIndex maps a click at content row y to an index into a visible-flows
 // slice of length nVis, replicating the scroll window renderTraffic computes
 // so a click always lands on the row the user actually sees. ok is false for
-// clicks on the header/filter rows or past the end of the (possibly short)
-// visible list — never a panic, just "nothing there."
-func flowRowIndex(y, h, nVis, selected int, filterLineShown, pausedShown bool) (idx int, ok bool) {
-	listTop, listRows := trafficRowLayout(h, filterLineShown, pausedShown)
+// clicks on the header/filter/cmdline rows or past the end of the (possibly
+// short) visible list — never a panic, just "nothing there."
+func flowRowIndex(y, h, nVis, selected int, filterLineShown, cmdlineShown, pausedShown bool) (idx int, ok bool) {
+	listTop, listRows := trafficRowLayout(h, filterLineShown, cmdlineShown, pausedShown)
 	if y < listTop {
 		return 0, false
 	}
@@ -289,5 +287,5 @@ func flowRowIndex(y, h, nVis, selected int, filterLineShown, pausedShown bool) (
 // clickedFlowIndex is flowRowIndex bound to this model's current state.
 func (m Model) clickedFlowIndex(y, h int) (idx int, ok bool) {
 	filterLineShown := m.filtering || m.fi.Value() != ""
-	return flowRowIndex(y, h, len(m.visible()), m.selected, filterLineShown, m.paused != nil)
+	return flowRowIndex(y, h, len(m.visible()), m.selected, filterLineShown, m.cmdline, m.paused != nil)
 }
