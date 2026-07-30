@@ -354,6 +354,41 @@ func TestFlaggedCommandTogglesTheViewRatherThanWriting(t *testing.T) {
 	}
 }
 
+func TestFlagCommandMatchesSpaceInFlaggedOnlyView(t *testing.T) {
+	base := modelWithFlows(2)
+	for _, f := range base.flows {
+		f.Flagged = true
+	}
+	base.flaggedOnly = true
+	base.selected = 1
+
+	viaKey := base
+	viaKey.flows = append([]*capture.Flow(nil), base.flows...)
+	keyFlow := *base.flows[1]
+	viaKey.flows[1] = &keyFlow
+
+	viaCommand := base
+	viaCommand.flows = append([]*capture.Flow(nil), base.flows...)
+	commandFlow := *base.flows[1]
+	viaCommand.flows[1] = &commandFlow
+
+	next, _ := viaKey.onKey(key(" "))
+	viaKey = next.(Model)
+	next, _ = viaCommand.runCommand("flag")
+	viaCommand = next.(Model)
+
+	if viaKey.selected != 0 || viaKey.selectedFlow() == nil {
+		t.Fatalf("Space left selected=%d with selectedFlow=%v; want row 0 selected",
+			viaKey.selected, viaKey.selectedFlow())
+	}
+	if viaCommand.selected != viaKey.selected {
+		t.Errorf(":flag selected=%d, Space selected=%d", viaCommand.selected, viaKey.selected)
+	}
+	if viaCommand.status != viaKey.status {
+		t.Errorf(":flag status=%q, Space status=%q", viaCommand.status, viaKey.status)
+	}
+}
+
 func TestOpenCommandLine(t *testing.T) {
 	m := modelWithFlows(1)
 	m = press(t, m, ":")

@@ -97,21 +97,7 @@ var commands = []command{
 		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.resendSelected(); return m, nil }},
 	{name: "flag", desc: "toggle the flag on the selected flow",
 		run: func(m Model, _ string) (Model, tea.Cmd) {
-			f := m.selectedFlow()
-			if f == nil {
-				m.status = "nothing selected to flag"
-				return m, nil
-			}
-			f.Flagged = !f.Flagged
-			// Under 'F' (flagged-only) an unflag drops the row out of the list,
-			// so re-clamp the way the F and sort keys do. Unlike space, the ':'
-			// line has already closed, so the status is the only feedback.
-			m.selected = clampIndex(m.selected, len(m.visible()))
-			if f.Flagged {
-				m.status = "flagged " + f.Title()
-			} else {
-				m.status = "unflagged " + f.Title()
-			}
+			m.status = m.toggleSelectedFlag()
 			return m, nil
 		}},
 	{name: "w", aliases: []string{"write", "save"}, desc: "save the session",

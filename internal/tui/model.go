@@ -183,6 +183,19 @@ func (m Model) selectedFlow() *capture.Flow {
 	return vis[m.selected]
 }
 
+func (m *Model) toggleSelectedFlag() string {
+	f := m.selectedFlow()
+	if f == nil {
+		return "nothing selected to flag"
+	}
+	f.Flagged = !f.Flagged
+	m.selected = clampIndex(m.selected, len(m.visible()))
+	if f.Flagged {
+		return "flagged " + f.Title()
+	}
+	return "unflagged " + f.Title()
+}
+
 // resendSelected re-issues the selected flow's request to its origin and adds
 // the new exchange to the store.
 func (m Model) resendSelected() string {
@@ -540,9 +553,7 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filtering = true
 		m.fi.Focus()
 	case ActFlowFlag:
-		if f := m.selectedFlow(); f != nil {
-			f.Flagged = !f.Flagged
-		}
+		m.status = m.toggleSelectedFlag()
 	case ActFlaggedOnly:
 		m.flaggedOnly = !m.flaggedOnly
 		m.selected = clampIndex(m.selected, len(m.visible()))
