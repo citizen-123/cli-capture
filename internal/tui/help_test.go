@@ -82,6 +82,117 @@ func TestVimHelpFollowsClaimedKeys(t *testing.T) {
 	}
 }
 
+func TestVimHelpOmitsRepeatWhenAllRepeatableMotionsAreUnbound(t *testing.T) {
+	km, err := NewKeyMap("", map[string]map[string]string{
+		ctxTraffic: {
+			"k":    string(Unbind),
+			"up":   string(Unbind),
+			"j":    string(Unbind),
+			"down": string(Unbind),
+			"{":    string(Unbind),
+			"}":    string(Unbind),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	motions := vimMotionHelp(Model{}.WithKeys(km).helpBody())
+	if strings.Contains(motions, "repeat") {
+		t.Errorf("motion help advertises counted repetition with no repeatable motion:\n%s", motions)
+	}
+	for _, want := range []string{"gg", "G", "{count}gg", "{count}G"} {
+		if !strings.Contains(motions, want) {
+			t.Errorf("motion help missing independent goto %q", want)
+		}
+	}
+}
+
+func TestVimHelpUsesReboundKeysInRepeatExamples(t *testing.T) {
+	km, err := NewKeyMap("", map[string]map[string]string{
+		ctxTraffic: {
+			"k":    string(Unbind),
+			"up":   string(Unbind),
+			"j":    string(Unbind),
+			"down": string(Unbind),
+			"{":    string(Unbind),
+			"}":    string(Unbind),
+			"p":    string(ActFlowPrev),
+			"n":    string(ActFlowNext),
+			"[":    string(ActHostPrev),
+			"]":    string(ActHostNext),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	motions := vimMotionHelp(Model{}.WithKeys(km).helpBody())
+	for _, want := range []string{"5p", "5n", "2[", "2]"} {
+		if !strings.Contains(motions, want) {
+			t.Errorf("motion help missing rebound counted-motion example %q:\n%s", want, motions)
+		}
+	}
+	for _, unwanted := range []string{"5j", "3k", "2}"} {
+		if strings.Contains(motions, unwanted) {
+			t.Errorf("motion help advertises disabled default %q:\n%s", unwanted, motions)
+		}
+	}
+}
+
+func TestCommandHelpFollowsCommandOpenerBinding(t *testing.T) {
+	tests := []struct {
+		name      string
+		overrides map[string]map[string]string
+		wantTable bool
+	}{
+		{
+			name: "unbound",
+			overrides: map[string]map[string]string{
+				ctxTraffic: {":": string(Unbind)},
+			},
+		},
+		{
+			name: "rebound",
+			overrides: map[string]map[string]string{
+				ctxTraffic: {
+					":": string(Unbind),
+					";": string(ActCommand),
+				},
+			},
+			wantTable: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			km, err := NewKeyMap("", tc.overrides)
+			if err != nil {
+				t.Fatal(err)
+			}
+			help := Model{}.WithKeys(km).helpBody()
+			hasTable := strings.Contains(help, "Traffic pane — : commands") &&
+				strings.Contains(help, ":filter (:f)")
+			if hasTable != tc.wantTable {
+				t.Errorf("command table present = %v, want %v", hasTable, tc.wantTable)
+			}
+			if tc.wantTable {
+				keyHelp, _, _ := strings.Cut(help, vimHelpHeading)
+				if !strings.Contains(keyHelp, ";") {
+					t.Error("rebound command opener is missing from traffic key help")
+				}
+			}
+		})
+	}
+}
+
+func vimMotionHelp(help string) string {
+	_, motions, _ := strings.Cut(help, vimHelpHeading)
+	motions, _, _ = strings.Cut(motions, "Traffic pane — : commands")
+	motions, _, _ = strings.Cut(motions, "Terminal pane (left)")
+	return motions
+}
+
 func TestCommandHelpIncludesAliases(t *testing.T) {
 	out := (Model{}).helpBody()
 	for _, want := range []string{

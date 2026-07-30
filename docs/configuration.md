@@ -168,10 +168,12 @@ Key names are the ones the help overlay shows: single characters, `enter`,
 | `repeater` | `repeater.cycle-focus` `repeater.cycle-mode` `repeater.send` `repeater.close` |
 
 The `?` overlay is generated from your live keymap, so it always shows what's
-actually bound — rebind a key and the help follows. The vim motions and the `:`
-commands are the exception: motions are prefixes and sequences rather than keys,
-and `:` commands stay reachable even when you unbind the matching key, so both
-are listed in the overlay unconditionally. See [keybindings](keybindings.md).
+actually bound — rebind a key and the help follows. Vim motions are prefixes and
+sequences rather than ordinary bindings, but their rows still reflect the
+effective traffic bindings. The `:` command table appears only while
+`flow.command` has a traffic binding; rebinding its opener keeps the table
+available, while fully unbinding it removes the inaccessible commands. See
+[keybindings](keybindings.md).
 
 Two things are rejected rather than silently ignored: an action bound in a
 context that doesn't have it, and binding the leader key inside another context
@@ -196,7 +198,9 @@ context that doesn't have it, and binding the leader key inside another context
 The built-in motion layer only sees keys the traffic keymap has not claimed.
 Binding or disabling `g` removes `gg`; binding or disabling `G` removes `G`
 and `{count}G`. Claiming any digit disables counted-motion help because that
-prefix is no longer fully available. The live help overlay reflects these
+prefix is no longer fully available. The counted-repeat row uses the effective
+bindings for `flow.prev`, `flow.next`, `flow.host-prev`, and `flow.host-next`,
+and disappears when all four are unbound. The live help overlay reflects these
 changes. See [keybindings](keybindings.md#vim-style-motions).
 
 ## Where a setting came from

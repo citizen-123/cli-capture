@@ -73,7 +73,9 @@ jump group.
 
 The motion rows shown by `?` follow the same availability rules: claiming `g`
 removes `gg`, claiming `G` removes `G` and `{count}G`, and claiming any digit
-removes counted-motion rows.
+removes counted-motion rows. Counted-repeat examples use the effective movement
+and host-jump bindings, and the repeat row disappears if all four actions are
+unbound.
 
 A pending count (or a lone `g` waiting for its pair) shows in the traffic pane
 header, so a half-typed motion is never invisible. It is discarded whenever
@@ -82,9 +84,11 @@ you started and abandoned can never attach itself to a later keystroke.
 
 ## The `:` command line
 
-`:` opens a command line in the traffic pane. It exists to reach actions that do
-not deserve a keybinding, and every command calls the same code as its key, so
-`:curl` and `c` do exactly the same thing.
+By default, `:` opens a command line in the traffic pane. Rebinding
+`flow.command` changes that opener; fully unbinding it removes the command table
+from `?` because the commands are no longer reachable. The command line exists
+to reach actions that do not deserve a keybinding, and every command calls the
+same code as its key, so `:curl` and `c` do exactly the same thing.
 
 | Command | Does |
 |---|---|

@@ -6,10 +6,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// vimHelpHeading opens the part of the overlay that is not keymap-derived:
-// motions (prefixes and two-key sequences the keymap cannot express) and the
-// ':' commands (deliberately available whether or not the equivalent action
-// still has a key). Tests about keymap-driven rows cut the output here.
+// vimHelpHeading opens the part of the overlay for motion prefixes and two-key
+// sequences the keymap cannot express directly. Their help still derives from
+// the effective traffic bindings.
 const vimHelpHeading = "Traffic pane — vim motions"
 
 // helpBody renders the help text itself, unbordered and unwindowed. Every row
@@ -60,17 +59,19 @@ func (m Model) helpBody() string {
 		writeHelpRow(&b, row[0], row[1])
 	}
 
-	b.WriteString("\n" + sectionStyle.Render("Traffic pane — : commands") + "\n")
-	names := make([]string, len(commands))
-	cmdWidth := 0
-	for i, c := range commands {
-		names[i] = commandHelpName(c)
-		if n := len([]rune(names[i])); n > cmdWidth {
-			cmdWidth = n
+	if len(km.keysFor(ctxTraffic, ActCommand)) > 0 {
+		b.WriteString("\n" + sectionStyle.Render("Traffic pane — : commands") + "\n")
+		names := make([]string, len(commands))
+		cmdWidth := 0
+		for i, c := range commands {
+			names[i] = commandHelpName(c)
+			if n := len([]rune(names[i])); n > cmdWidth {
+				cmdWidth = n
+			}
 		}
-	}
-	for i, c := range commands {
-		writeHelpRowW(&b, names[i], c.desc, cmdWidth+2)
+		for i, c := range commands {
+			writeHelpRowW(&b, names[i], c.desc, cmdWidth+2)
+		}
 	}
 
 	b.WriteString("\n" + sectionStyle.Render("Terminal pane (left)") + "\n")
@@ -94,8 +95,27 @@ func motionHelpRows(km KeyMap) [][2]string {
 	}
 
 	var rows [][2]string
-	if digitsFree {
-		rows = append(rows, [2]string{"{count}", "repeat the next available motion: 5j, 3k, 2}"})
+	repeatable := []struct {
+		action Action
+		count  string
+	}{
+		{ActFlowPrev, "5"},
+		{ActFlowNext, "5"},
+		{ActHostPrev, "2"},
+		{ActHostNext, "2"},
+	}
+	var examples []string
+	for _, motion := range repeatable {
+		keys := km.keysFor(ctxTraffic, motion.action)
+		if len(keys) > 0 {
+			examples = append(examples, motion.count+prettyKeys(keys)[0])
+		}
+	}
+	if digitsFree && len(examples) > 0 {
+		rows = append(rows, [2]string{
+			"{count}",
+			"repeat a bound motion — " + strings.Join(examples, ", "),
+		})
 	}
 	if !km.claims(ctxTraffic, "g") {
 		rows = append(rows, [2]string{"gg", "first flow"})
