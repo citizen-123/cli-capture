@@ -100,6 +100,9 @@ func TestCommandHelpIncludesAliases(t *testing.T) {
 
 func TestCommandHelpDescribesCurlAsAFileExport(t *testing.T) {
 	out := (Model{}).helpBody()
+	if strings.Contains(out, "copy the selected flow") {
+		t.Error(":curl help promises a clipboard copy, but the action writes a file")
+	}
 	if !strings.Contains(out, "write the selected flow to a .curl file") {
 		t.Error("command help must describe :curl as writing a .curl file")
 	}

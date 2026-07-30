@@ -89,7 +89,7 @@ not deserve a keybinding, and every command calls the same code as its key, so
 | `:export har\|flagged` | **write flows to disk** — `capture.har` or `flagged.txt` |
 | `:har` | shorthand for `:export har` |
 | `:flagged` | show only flagged flows, same as `F` (`:only`) |
-| `:curl` | write the selected flow to a `.curl` file |
+| `:curl` | write the selected flow to `flow-<id>.curl` |
 | `:resend` | resend the selected flow |
 | `:flag` | toggle the flag on the selected flow |
 | `:w` | save the session (`:write`, `:save`) |
