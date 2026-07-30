@@ -67,6 +67,10 @@ they are ordinary bindings and can be rebound like any other.)
 | `{count}G`, `{count}gg` | jump to that row — `12G`, `5gg` |
 | `esc` | discard a half-typed count |
 
+The motion rows shown by `?` follow the same availability rules: claiming `g`
+removes `gg`, claiming `G` removes `G` and `{count}G`, and claiming any digit
+removes counted-motion rows.
+
 A pending count (or a lone `g` waiting for its pair) shows in the traffic pane
 header, so a half-typed motion is never invisible. It is discarded whenever
 focus leaves the list — the leader key, the terminal pane, or `esc` — so a count
@@ -94,7 +98,8 @@ not deserve a keybinding, and every command calls the same code as its key, so
 
 Each command has a short form, typed after the `:` — these are abbreviations of
 the *command*, not references to pane keys, and several deliberately differ from
-the key that does the same job:
+the key that does the same job. Aliases also appear beside canonical command
+names in the in-app help overlay:
 
 | Short | Full |
 |---|---|

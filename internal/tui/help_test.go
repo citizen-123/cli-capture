@@ -26,6 +26,78 @@ func TestHelpViewCoversShortcuts(t *testing.T) {
 	}
 }
 
+func TestVimHelpFollowsClaimedKeys(t *testing.T) {
+	tests := []struct {
+		name      string
+		overrides map[string]map[string]string
+		present   []string
+		absent    []string
+	}{
+		{
+			name: "G disabled leaves gg available",
+			overrides: map[string]map[string]string{
+				ctxTraffic: {"G": string(Unbind)},
+			},
+			present: []string{"gg"},
+			absent:  []string{"gg / G", "{count}G"},
+		},
+		{
+			name: "g rebound leaves G available",
+			overrides: map[string]map[string]string{
+				ctxTraffic: {"g": string(ActFlowPrev)},
+			},
+			present: []string{"G"},
+			absent:  []string{"gg / G"},
+		},
+		{
+			name: "digit claimed hides counted motions",
+			overrides: map[string]map[string]string{
+				ctxTraffic: {"5": string(ActFlowNext)},
+			},
+			present: []string{"gg", "G"},
+			absent:  []string{"{count}", "{count}G"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			km, err := NewKeyMap("", tc.overrides)
+			if err != nil {
+				t.Fatal(err)
+			}
+			help := Model{}.WithKeys(km).helpBody()
+			_, motionSection, _ := strings.Cut(help, vimHelpHeading)
+			motionSection, _, _ = strings.Cut(motionSection, "Traffic pane — : commands")
+			for _, want := range tc.present {
+				if !strings.Contains(motionSection, want) {
+					t.Errorf("motion help missing %q", want)
+				}
+			}
+			for _, unwanted := range tc.absent {
+				if strings.Contains(motionSection, unwanted) {
+					t.Errorf("motion help unexpectedly contains %q", unwanted)
+				}
+			}
+		})
+	}
+}
+
+func TestCommandHelpIncludesAliases(t *testing.T) {
+	out := (Model{}).helpBody()
+	for _, want := range []string{
+		":filter (:f)",
+		":curl (:y)",
+		":resend (:x)",
+		":flagged (:only)",
+		":w (:write, :save)",
+		":q (:quit)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("command help missing canonical/alias display %q", want)
+		}
+	}
+}
+
 // The overlay body is far taller than a terminal, and the ':' command section
 // sits near the bottom. Before scrolling it was simply unreachable, which made
 // the "table documents itself" design a fiction.

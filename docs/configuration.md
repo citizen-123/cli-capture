@@ -193,13 +193,11 @@ context that doesn't have it, and binding the leader key inside another context
 }
 ```
 
-> **Don't bind `g` or `G` in the `traffic` context.** The motion layer only sees
-> keys the keymap has not claimed, so binding either one silently disables `gg`,
-> `G`, and `{count}G` — and the help overlay will still advertise them, because
-> that section isn't keymap-derived. Binding one to `none` explicitly disables
-> its motion too. Digits `0`–`9` are the same: bind one and counted motions like
-> `5j` stop working. See
-> [keybindings](keybindings.md#vim-style-motions).
+The built-in motion layer only sees keys the traffic keymap has not claimed.
+Binding or disabling `g` removes `gg`; binding or disabling `G` removes `G`
+and `{count}G`. Claiming any digit disables counted-motion help because that
+prefix is no longer fully available. The live help overlay reflects these
+changes. See [keybindings](keybindings.md#vim-style-motions).
 
 ## Where a setting came from
 

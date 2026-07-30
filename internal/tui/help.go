@@ -53,21 +53,18 @@ func (m Model) helpBody() string {
 	}
 
 	// Motions are prefixes and two-key sequences, so they cannot be keymap
-	// entries the way every row above is — hence the hand-written section.
+	// entries the way every row above is. Their available prefixes still follow
+	// the live keymap, though.
 	b.WriteString("\n" + sectionStyle.Render(vimHelpHeading) + "\n")
-	writeHelpRow(&b, "{count}", "repeats the next motion: 5j, 3k, 2}")
-	writeHelpRow(&b, "gg / G", "first / last flow")
-	writeHelpRow(&b, "{count}G", "jump to that row — 12G, and 5gg for row 5")
-	writeHelpRow(&b, "esc", "discard a half-typed count")
+	for _, row := range motionHelpRows(km) {
+		writeHelpRow(&b, row[0], row[1])
+	}
 
 	b.WriteString("\n" + sectionStyle.Render("Traffic pane — : commands") + "\n")
 	names := make([]string, len(commands))
 	cmdWidth := 0
 	for i, c := range commands {
-		names[i] = ":" + c.name
-		if c.args != "" {
-			names[i] += " " + c.args
-		}
+		names[i] = commandHelpName(c)
 		if n := len([]rune(names[i])); n > cmdWidth {
 			cmdWidth = n
 		}
@@ -83,6 +80,54 @@ func (m Model) helpBody() string {
 	b.WriteString("\n" + dimStyle.Render("Workflow: arm interception with "+km.LeaderName+" i (scope with -scope); matching") + "\n")
 	b.WriteString(dimStyle.Render("requests PAUSE so you can e-dit, f-orward, or d-rop them.") + "\n")
 	return b.String()
+}
+
+// motionHelpRows lists the built-in motion capabilities whose prefixes remain
+// available after traffic-pane bindings claim their keys.
+func motionHelpRows(km KeyMap) [][2]string {
+	digitsFree := true
+	for key := '0'; key <= '9'; key++ {
+		if km.claims(ctxTraffic, string(key)) {
+			digitsFree = false
+			break
+		}
+	}
+
+	var rows [][2]string
+	if digitsFree {
+		rows = append(rows, [2]string{"{count}", "repeat the next available motion: 5j, 3k, 2}"})
+	}
+	if !km.claims(ctxTraffic, "g") {
+		rows = append(rows, [2]string{"gg", "first flow"})
+		if digitsFree {
+			rows = append(rows, [2]string{"{count}gg", "jump to that row — 5gg goes to row 5"})
+		}
+	}
+	if !km.claims(ctxTraffic, "G") {
+		rows = append(rows, [2]string{"G", "last flow"})
+		if digitsFree {
+			rows = append(rows, [2]string{"{count}G", "jump to that row — 12G goes to row 12"})
+		}
+	}
+	rows = append(rows, [2]string{"esc", "discard a half-typed motion"})
+	return rows
+}
+
+// commandHelpName renders a command's canonical spelling, aliases, and
+// arguments together so every way to invoke it is discoverable in the overlay.
+func commandHelpName(c command) string {
+	name := ":" + c.name
+	if len(c.aliases) > 0 {
+		aliases := make([]string, len(c.aliases))
+		for i, alias := range c.aliases {
+			aliases[i] = ":" + alias
+		}
+		name += " (" + strings.Join(aliases, ", ") + ")"
+	}
+	if c.args != "" {
+		name += " " + c.args
+	}
+	return name
 }
 
 // helpChrome is the number of lines frameHelp adds around the content: one
