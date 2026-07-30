@@ -193,6 +193,20 @@ func (m Model) helpViewAt(h, scroll int) string {
 		helpFooter(scroll > 0, scroll+avail < len(lines)))
 }
 
+// clampHelpScroll bounds helpScroll to the overlay's scrollable range. Both
+// input paths into the overlay end here — onHelpKey for j/k/G/gg, onHelpMouse
+// for the wheel — so the two cannot drift into disagreeing about where the
+// bottom is.
+func (m Model) clampHelpScroll() Model {
+	if max := m.maxHelpScroll(m.height); m.helpScroll > max {
+		m.helpScroll = max
+	}
+	if m.helpScroll < 0 {
+		m.helpScroll = 0
+	}
+	return m
+}
+
 // maxHelpScroll is the largest useful scroll offset for a terminal of h rows.
 func (m Model) maxHelpScroll(h int) int {
 	avail := h - helpChrome - 1

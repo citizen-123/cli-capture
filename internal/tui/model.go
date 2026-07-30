@@ -407,13 +407,7 @@ func (m Model) onHelpKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case k.String() == "g":
 		m.helpScroll = 0
 	}
-	if m.helpScroll > max {
-		m.helpScroll = max
-	}
-	if m.helpScroll < 0 {
-		m.helpScroll = 0
-	}
-	return m, nil
+	return m.clampHelpScroll(), nil
 }
 
 // onFilterKey handles keys while the flow-list filter is being edited. Enter

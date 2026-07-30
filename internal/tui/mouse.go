@@ -104,13 +104,7 @@ func (m Model) onHelpMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
-	if max := m.maxHelpScroll(m.height); m.helpScroll > max {
-		m.helpScroll = max
-	}
-	if m.helpScroll < 0 {
-		m.helpScroll = 0
-	}
-	return m, nil
+	return m.clampHelpScroll(), nil
 }
 
 // onRepeaterMouse handles mouse input while the Repeater modal is up. Like the
@@ -329,13 +323,14 @@ func (m Model) wheelEditor(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil // a horizontal notch has no line to move to
 	}
-	cmds := make([]tea.Cmd, 0, wheelLines)
+	// Only the last command survives on purpose. Each Update that moves the
+	// cursor returns a fresh cursor-blink timer, so batching all three would
+	// leave two stray timers racing to toggle the cursor.
+	var cmd tea.Cmd
 	for i := 0; i < wheelLines; i++ {
-		var cmd tea.Cmd
 		m.ta, cmd = m.ta.Update(key)
-		cmds = append(cmds, cmd)
 	}
-	return m, tea.Batch(cmds...)
+	return m, cmd
 }
 
 // trafficRowLayout mirrors renderTraffic's row accounting: how many rows sit
