@@ -280,7 +280,7 @@ func TestOnMouseRightPaneWheelMovesSelectionClamped(t *testing.T) {
 // focusTerminal and selected at 0, so any leak through the modal gate shows up
 // as one of those changing.
 func modalModel(screen *fakeEmulator) Model {
-	return Model{
+	m := Model{
 		width:      100,
 		height:     40,
 		splitRatio: 0.5,
@@ -290,9 +290,17 @@ func modalModel(screen *fakeEmulator) Model {
 		vp:         viewport.New(0, 0),
 		rep:        repeaterState{respVP: viewport.New(0, 0)},
 		flows:      newFlows(5),
-		screen:     screen,
 		target:     &runner.Target{},
 	}
+	// Assigned only when non-nil, rather than unconditionally. m.screen is an
+	// interface, so a nil *fakeEmulator stored in it makes a NON-nil interface
+	// holding a nil pointer — onLeftPaneMouse's `m.screen == nil` guard would
+	// wave it through and ForwardMouse would panic on the nil receiver. Leaving
+	// the field alone keeps the guard working for callers that pass nil.
+	if screen != nil {
+		m.screen = screen
+	}
+	return m
 }
 
 // editingModel builds a model with the raw editor open over the right pane,
@@ -399,12 +407,19 @@ func TestHelpOverlayWheelScrolls(t *testing.T) {
 func TestHelpOverlayWheelClampsAtBottom(t *testing.T) {
 	m := modalModel(nil)
 	m.showHelp = true
-	m.helpScroll = m.maxHelpScroll(m.height)
+	max := m.maxHelpScroll(m.height)
+	// Without this the test passes vacuously on a terminal tall enough to show
+	// the whole help body: max would be 0, the scroll would already be at the
+	// bottom, and "it didn't move" would prove nothing about the clamp.
+	if max == 0 {
+		t.Fatal("help body fits this test terminal, so there is no clamp to observe; shorten m.height")
+	}
+	m.helpScroll = max
 
 	ev := tea.MouseMsg{X: 10, Y: 10, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
 	newModel, _ := m.Update(ev)
-	if got, want := newModel.(Model).helpScroll, m.maxHelpScroll(m.height); got != want {
-		t.Errorf("wheel down at the bottom of the help overlay: helpScroll = %d, want it clamped at %d", got, want)
+	if got := newModel.(Model).helpScroll; got != max {
+		t.Errorf("wheel down at the bottom of the help overlay: helpScroll = %d, want it clamped at %d", got, max)
 	}
 }
 
