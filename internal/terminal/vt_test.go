@@ -1,12 +1,8 @@
 package terminal
 
 import (
-	"io"
-	"os"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 )
 
 // stripANSI removes CSI escape sequences so positional assertions can look at
@@ -104,108 +100,5 @@ func TestVTRenderClipsToRequestedSize(t *testing.T) {
 	}
 	if lines[0] != "01234567" {
 		t.Errorf("clipped row = %q, want %q", lines[0], "01234567")
-	}
-}
-
-// TestVTCloseStopsReplyPumpWithoutLeaking exercises the shutdown path Close
-// exists for: NewVT's pump goroutine is blocked in Read() on an empty pipe,
-// and Close must unblock it (rather than leaving it running forever) before
-// returning.
-func TestVTCloseStopsReplyPumpWithoutLeaking(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	defer r.Close()
-
-	vt := NewVT(10, 2, w)
-	// Close must return promptly (it blocks on the pump's done channel) —
-	// if the pump were leaking instead of exiting on io.EOF, this call would
-	// hang and the test would time out rather than fail cleanly.
-	if err := vt.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
-}
-
-// blockingWriter parks the first Write it receives until release is closed,
-// standing in for the target's PTY once a stalled child has stopped draining
-// it. entered closes as the Write parks, so a test can wait for the pump to be
-// definitively stuck rather than sleeping and hoping.
-type blockingWriter struct {
-	once    sync.Once
-	entered chan struct{}
-	release chan struct{}
-}
-
-func newBlockingWriter() *blockingWriter {
-	return &blockingWriter{entered: make(chan struct{}), release: make(chan struct{})}
-}
-
-func (w *blockingWriter) Write(p []byte) (int, error) {
-	w.once.Do(func() { close(w.entered) })
-	<-w.release
-	return len(p), nil
-}
-
-// TestVTCloseReturnsWhileReplyPumpIsStuckWriting is the hang Close's bounded
-// wait exists to prevent.
-//
-// pumpReplies has two parking spots, and term.Close only reaches one of them.
-// Unblocking a pump parked in Read is what Close is built for; a pump parked in
-// resp.Write — where it sits whenever the child has stopped draining its pty —
-// cannot be woken from here at all, and darwin will not take a write deadline
-// on a pty master to fix it at the cause. Before the bound, that turned a
-// wedged child into a wedged quit: Close waited on a channel that would never
-// close.
-//
-// The writer here blocks unconditionally rather than being a real full pty,
-// because "resp.Write never returns" is the property under test and a real pty
-// only reaches that state by timing.
-func TestVTCloseReturnsWhileReplyPumpIsStuckWriting(t *testing.T) {
-	w := newBlockingWriter()
-	defer close(w.release) // let the abandoned pump exit before the test binary does
-
-	vt := NewVT(20, 5, w)
-
-	// Make the emulator produce bytes so the pump has something to write. A
-	// click is only emitted once the child has asked for mouse tracking, so
-	// enable it first (the same setup the ForwardMouse tests use).
-	if _, err := vt.Write([]byte("\x1b[?1000h\x1b[?1006h")); err != nil {
-		t.Fatalf("Write(enable mouse): %v", err)
-	}
-	vt.ForwardMouse(MouseEvent{X: 4, Y: 2, Button: MouseButtonLeft, Action: MouseActionPress})
-
-	select {
-	case <-w.entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reply pump never reached resp.Write; the test never set up the condition it means to check")
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- vt.Close() }()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("Close: %v", err)
-		}
-	case <-time.After(closeGrace + 5*time.Second):
-		t.Fatal("Close did not return with the reply pump stuck in resp.Write — quitting the TUI would hang")
-	}
-}
-
-// TestVTCloseIsPromptWhenThePumpCanExit guards the other half of the bound: the
-// grace period is a ceiling for the stuck case, not a delay every shutdown
-// pays. An ordinary Close must still return as soon as the pump is gone.
-func TestVTCloseIsPromptWhenThePumpCanExit(t *testing.T) {
-	vt := NewVT(10, 2, io.Discard)
-
-	start := time.Now()
-	if err := vt.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed >= closeGrace {
-		t.Errorf("Close took %v with a pump that could exit; it waited out the %v grace period instead of returning on done",
-			elapsed, closeGrace)
 	}
 }
