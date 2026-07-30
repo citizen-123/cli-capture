@@ -149,8 +149,11 @@ func TestHelpFollowsTheKeymap(t *testing.T) {
 	if !strings.Contains(out, "g") {
 		t.Error("help should list a newly bound key")
 	}
-	// An action with no keys left drops out of the help entirely.
-	if strings.Contains(out, "resend the selected flow") {
+	// An action with no keys left drops out of the key sections entirely. Only
+	// those sections are keymap-derived: ':resend' stays listed below, because
+	// the command line is reachable whether or not the action still has a key.
+	keyHelp, _, _ := strings.Cut(out, vimHelpHeading)
+	if strings.Contains(keyHelp, "resend the selected flow") {
 		t.Error("fully unbound action should not appear in help")
 	}
 	// The space key needs a readable name or the row looks blank.

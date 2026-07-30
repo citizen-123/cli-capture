@@ -31,8 +31,8 @@ Every key is optional — a file may set only what it changes.
     "leader": "ctrl+b",
     "bindings": {
       "traffic": {
-        "g": "flow.prev",
-        "G": "flow.next",
+        "p": "flow.prev",
+        "n": "flow.next",
         "x": "none"
       }
     }
@@ -162,34 +162,46 @@ Key names are the ones the help overlay shows: single characters, `enter`,
 | Context | Actions |
 |---|---|
 | `leader` | `pane.switch` `split.shrink` `split.grow` `intercept.requests` `intercept.responses` `session.save` `export.har` `export.flagged` `help.toggle` `app.quit` |
-| `traffic` | `flow.prev` `flow.next` `flow.flag` `flow.flagged-only` `flow.sort` `flow.filter` `flow.detail` `flow.resend` `repeater.open` `export.curl` `paused.edit` `paused.forward` `paused.drop` `ws.inject.client` `ws.inject.server` `intercept.requests` `intercept.responses` `help.toggle` |
+| `traffic` | `flow.prev` `flow.next` `flow.host-next` `flow.host-prev` `flow.flag` `flow.flagged-only` `flow.sort` `flow.filter` `flow.command` `flow.detail` `flow.resend` `repeater.open` `export.curl` `paused.edit` `paused.forward` `paused.drop` `ws.inject.client` `ws.inject.server` `intercept.requests` `intercept.responses` `help.toggle` |
 | `detail` | `detail.save` `detail.close` |
 | `editor` | `editor.send` `editor.fix-length` `editor.cancel` |
 | `repeater` | `repeater.cycle-focus` `repeater.cycle-mode` `repeater.send` `repeater.close` |
 
 The `?` overlay is generated from your live keymap, so it always shows what's
-actually bound — rebind a key and the help follows.
+actually bound — rebind a key and the help follows. Vim motions are prefixes and
+sequences rather than ordinary bindings, but their rows still reflect the
+effective traffic bindings. The `:` command table appears only while
+`flow.command` has a traffic binding; rebinding its opener keeps the table
+available, while fully unbinding it removes the inaccessible commands. See
+[keybindings](keybindings.md).
 
 Two things are rejected rather than silently ignored: an action bound in a
 context that doesn't have it, and binding the leader key inside another context
 (the leader is consumed first, so that binding could never fire).
 
-### Example: vim-ish list movement
+### Example: rebinding list movement
 
 ```json
 {
   "keys": {
     "bindings": {
       "traffic": {
-        "g": "flow.prev",
-        "G": "flow.next",
-        "/": "flow.filter",
-        "n": "none"
+        "p": "flow.prev",
+        "n": "flow.next",
+        "/": "flow.filter"
       }
     }
   }
 }
 ```
+
+The built-in motion layer only sees keys the traffic keymap has not claimed.
+Binding or disabling `g` removes `gg`; binding or disabling `G` removes `G`
+and `{count}G`. Claiming any digit disables counted-motion help because that
+prefix is no longer fully available. The counted-repeat row uses the effective
+bindings for `flow.prev`, `flow.next`, `flow.host-prev`, and `flow.host-next`,
+and disappears when all four are unbound. The live help overlay reflects these
+changes. See [keybindings](keybindings.md#vim-style-motions).
 
 ## Where a setting came from
 

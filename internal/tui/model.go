@@ -71,9 +71,14 @@ type Model struct {
 	injectDir     capture.Direction
 	filtering     bool // true while editing the flow-list filter
 	fi            textinput.Model
+	cmdline       bool // true while editing the ':' command line (vim spike, #9)
+	ci            textinput.Model
+	count         int  // pending numeric prefix for list motions (5j, 3k)
+	pendingG      bool // saw one 'g'; a second makes gg (jump to top)
 	flaggedOnly   bool // show only flagged flows
 	sort          sortMode
 	showHelp      bool // floating help overlay
+	helpScroll    int  // first visible line of the help overlay
 	repeating     bool // repeater modal open
 	rep           repeaterState
 	splitRatio    float64 // fraction of the width given to the left (terminal) pane
@@ -119,6 +124,7 @@ func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, 
 		ta:          newEditor(),
 		vp:          viewport.New(0, 0),
 		fi:          newFilter(),
+		ci:          newCommandLine(),
 		splitRatio:  0.5,
 		sessionPath: sessionPath,
 		status:      "? for help · Ctrl+A w switch pane · Ctrl+A < > resize · Ctrl+A i arm intercept · Ctrl+A q quit",
@@ -175,6 +181,19 @@ func (m Model) selectedFlow() *capture.Flow {
 		return nil
 	}
 	return vis[m.selected]
+}
+
+func (m *Model) toggleSelectedFlag() string {
+	f := m.selectedFlow()
+	if f == nil {
+		return "nothing selected to flag"
+	}
+	f.Flagged = !f.Flagged
+	m.selected = clampIndex(m.selected, len(m.visible()))
+	if f.Flagged {
+		return "flagged " + f.Title()
+	}
+	return "unflagged " + f.Title()
 }
 
 // resendSelected re-issues the selected flow's request to its origin and adds
@@ -300,6 +319,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.paused = msg.item.Flow
 		m.pausedMsg = msg.item.Msg
 		m.focus = focusTraffic
+		// Close any open text input. A paused flow is blocking a real client and
+		// the prompt below tells the user to press e/f/d — but a focused input
+		// would swallow those as literal text, and ':f' means filter, not
+		// forward. Whatever was half-typed matters less than the held request.
+		m = m.clearMotion()
+		m.cmdline, m.filtering = false, false
+		m.ci.Blur()
+		m.ci.SetValue("")
+		m.fi.Blur()
 		m.status = "PAUSED: [e]dit  [f]orward  [d]rop"
 		return m, waitPause(m.feeds.Pause)
 
@@ -331,6 +359,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.filtering {
 			return m.onFilterKey(msg)
 		}
+		if m.cmdline {
+			return m.onCmdKey(msg)
+		}
 		if m.viewing {
 			return m.onViewKey(msg)
 		}
@@ -340,13 +371,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // onHelpKey handles keys while the help overlay is open: it is modal, so keys
-// don't fall through — esc/q/? close it, Ctrl+Q still quits.
+// don't fall through — esc/q/? close it, Ctrl+Q still quits. The body is far
+// taller than a terminal, so j/k/G/gg scroll it; without that the ':' command
+// section near the bottom would be unreachable.
 func (m Model) onHelpKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if k.Type == tea.KeyCtrlQ {
 		return m, tea.Quit
 	}
-	if k.Type == tea.KeyEsc || k.String() == "q" || k.String() == "?" {
+	max := m.maxHelpScroll(m.height)
+	switch {
+	case k.Type == tea.KeyEsc, k.String() == "q", k.String() == "?":
 		m.showHelp = false
+		return m, nil
+	case k.String() == "j", k.Type == tea.KeyDown:
+		m.helpScroll++
+	case k.String() == "k", k.Type == tea.KeyUp:
+		m.helpScroll--
+	case k.Type == tea.KeyPgDown, k.String() == "ctrl+f":
+		m.helpScroll += max/4 + 1
+	case k.Type == tea.KeyPgUp, k.String() == "ctrl+b":
+		m.helpScroll -= max/4 + 1
+	case k.String() == "G":
+		m.helpScroll = max
+	case k.String() == "g":
+		m.helpScroll = 0
+	}
+	if m.helpScroll > max {
+		m.helpScroll = max
+	}
+	if m.helpScroll < 0 {
+		m.helpScroll = 0
 	}
 	return m, nil
 }
@@ -409,15 +463,20 @@ func (m *Model) openDetail() {
 
 func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Leader dispatch: if the previous key was the leader, this key is a command.
+	// A half-typed motion is abandoned on the way out of the traffic pane: it
+	// belongs to that pane, and a count left pending across a leader sequence or
+	// a spell in the terminal would silently multiply some later j.
 	if m.pendingLeader {
-		return m.leaderCommand(k)
+		return m.clearMotion().leaderCommand(k)
 	}
 	if k.Type == m.km().Leader {
+		m = m.clearMotion()
 		m.pendingLeader = true
 		return m, nil
 	}
 
 	if m.focus == focusTerminal {
+		m = m.clearMotion()
 		// Forward the keystroke to the child PTY verbatim.
 		if b := keyBytes(k); b != nil && m.target != nil {
 			m.target.Pty.Write(b)
@@ -427,26 +486,74 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Traffic pane. Interception toggles also live here as plain letters because
 	// this pane never forwards keystrokes to the target.
-	switch m.km().Action(ctxTraffic, k.String()) {
+	key := k.String()
+	act := m.km().Action(ctxTraffic, key)
+
+	// vim-style numeric prefix and gg/G motions (spike, #9): only for keys the
+	// keymap doesn't claim (user bindings always win) and only in the traffic
+	// pane, so counts/motions never reach a target that might itself be vim.
+	if act == "" && !m.km().claims(ctxTraffic, key) {
+		if n, ok := digit(key); ok && (n > 0 || m.count > 0) {
+			m.count = m.count*10 + n
+			if m.count > 100000 {
+				m.count = 100000
+			}
+			return m, nil
+		}
+		switch key {
+		case "g": // gg → first flow, or row {count} — vim's 5gg is line 5
+			if !m.pendingG {
+				m.pendingG = true
+				return m, nil
+			}
+			n := len(m.visible())
+			target := 0
+			if m.count > 0 {
+				target = clampIndex(m.count-1, n)
+			}
+			m.selected = target
+			return m.clearMotion(), nil
+		case "G": // jump to the last flow, or to row {count}
+			n := len(m.visible())
+			target := n - 1
+			if m.count > 0 {
+				target = clampIndex(m.count-1, n)
+			}
+			if target < 0 {
+				target = 0
+			}
+			m.selected = target
+			return m.clearMotion(), nil
+		}
+	}
+	m.pendingG = false
+	count := m.count
+	if count < 1 {
+		count = 1
+	}
+	m.count = 0
+
+	switch act {
 	case ActInterceptRequests:
 		m.engine.SetEnabled(!m.engine.Enabled())
 	case ActInterceptResponses:
 		m.engine.SetInterceptResponses(!m.engine.InterceptResponses())
 	case ActFlowPrev:
-		if m.selected > 0 {
-			m.selected--
-		}
+		m.selected = clampIndex(m.selected-count, len(m.visible()))
 	case ActFlowNext:
-		if m.selected < len(m.visible())-1 {
-			m.selected++
-		}
+		m.selected = clampIndex(m.selected+count, len(m.visible()))
+	case ActHostNext:
+		m.selected = hostJump(m.visible(), m.selected, +1, count)
+	case ActHostPrev:
+		m.selected = hostJump(m.visible(), m.selected, -1, count)
+	case ActCommand:
+		m.cmdline = true
+		m.ci.Focus()
 	case ActFilterOpen:
 		m.filtering = true
 		m.fi.Focus()
 	case ActFlowFlag:
-		if f := m.selectedFlow(); f != nil {
-			f.Flagged = !f.Flagged
-		}
+		m.status = m.toggleSelectedFlag()
 	case ActFlaggedOnly:
 		m.flaggedOnly = !m.flaggedOnly
 		m.selected = clampIndex(m.selected, len(m.visible()))
@@ -472,7 +579,7 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "dropped"
 		}
 	case ActHelpToggle:
-		m.showHelp = true
+		m.showHelp, m.helpScroll = true, 0
 	case ActRepeaterNew:
 		m.openRepeater()
 	case ActFlowResend:
@@ -563,7 +670,7 @@ func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ActSplitGrow:
 		m.adjustSplit(splitStep)
 	case ActHelpToggle:
-		m.showHelp = !m.showHelp
+		m.showHelp, m.helpScroll = !m.showHelp, 0
 	}
 	return m, nil
 }
@@ -702,7 +809,8 @@ func (m Model) View() string {
 		return "starting…"
 	}
 	if m.showHelp {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.helpView())
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			m.helpViewAt(m.height, m.helpScroll))
 	}
 	if m.repeating {
 		return m.repeaterView()
@@ -744,6 +852,12 @@ func (m Model) renderTraffic(w, h int) string {
 	if m.sort != sortNone {
 		header += " ↕" + m.sort.String()
 	}
+	// Pending vim motion (a count like "12" or a lone "g" awaiting the second).
+	if m.count > 0 {
+		header += fmt.Sprintf("  %d", m.count)
+	} else if m.pendingG {
+		header += "  g"
+	}
 	b.WriteString(titleStyle.Render(header) + "\n")
 
 	// Reserve lines for the header, the optional filter line, and the paused
@@ -751,6 +865,10 @@ func (m Model) renderTraffic(w, h int) string {
 	reserved := 1
 	if m.filtering || m.fi.Value() != "" {
 		b.WriteString(truncate(m.fi.View(), w) + "\n")
+		reserved++
+	}
+	if m.cmdline {
+		b.WriteString(truncate(m.ci.View(), w) + "\n")
 		reserved++
 	}
 	if m.paused != nil {
@@ -814,12 +932,19 @@ func (m Model) renderEditor() string {
 	return titleStyle.Render(m.renderEditorTitle()) + "\n" + m.ta.View()
 }
 
+// truncate bounds s to n columns, counting runes rather than bytes: slicing a
+// byte offset can land inside a multibyte rune and emit invalid UTF-8, which a
+// terminal renders as a replacement glyph.
 func truncate(s string, n int) string {
-	if n <= 0 || len(s) <= n {
+	if n <= 0 {
 		return s
 	}
-	if n <= 1 {
-		return s[:n]
+	r := []rune(s)
+	if len(r) <= n {
+		return s
 	}
-	return s[:n-1] + "…"
+	if n == 1 {
+		return string(r[:1])
+	}
+	return string(r[:n-1]) + "…"
 }

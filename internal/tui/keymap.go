@@ -32,10 +32,13 @@ const (
 
 	ActFlowNext    Action = "flow.next"
 	ActFlowPrev    Action = "flow.prev"
+	ActHostNext    Action = "flow.host-next"
+	ActHostPrev    Action = "flow.host-prev"
 	ActFlowFlag    Action = "flow.flag"
 	ActFlaggedOnly Action = "flow.flagged-only"
 	ActSortCycle   Action = "flow.sort"
 	ActFilterOpen  Action = "flow.filter"
+	ActCommand     Action = "flow.command"
 	ActFlowResend  Action = "flow.resend"
 	ActDetailOpen  Action = "flow.detail"
 	ActRepeaterNew Action = "repeater.open"
@@ -108,6 +111,9 @@ var defaults = map[string][]binding{
 		{ActFlaggedOnly, []string{"F"}, "show flagged only"},
 		{ActSortCycle, []string{"o"}, "cycle sort: none / status / size"},
 		{ActFilterOpen, []string{"/"}, "filter by host / method / path / status"},
+		{ActCommand, []string{":"}, "command line — run :help for the full list"},
+		{ActHostNext, []string{"}"}, "jump to the next flow from a different host"},
+		{ActHostPrev, []string{"{"}, "jump back to the previous host"},
 		{ActDetailOpen, []string{"enter"}, "open detail view"},
 		{ActInterceptRequests, []string{"i"}, "toggle intercept: requests"},
 		{ActInterceptResponses, []string{"r"}, "toggle intercept: responses"},
@@ -261,7 +267,10 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 				return KeyMap{}, fmt.Errorf("keys: %s: %q is the leader, so it never reaches this context", ctx, key)
 			}
 			if action == Unbind {
-				delete(km.binds[ctx], key)
+				// Keep an explicit tombstone. Action still reports this as
+				// unbound, but the vim fallback can distinguish a user's
+				// deliberate "none" from a key that was never configured.
+				km.binds[ctx][key] = Unbind
 				continue
 			}
 			km.binds[ctx][key] = action
@@ -284,7 +293,22 @@ func (k KeyMap) Action(ctx, key string) Action {
 	if k.binds == nil {
 		return defaultKeyMap.Action(ctx, key) // cached; do not rebuild per keystroke
 	}
-	return k.binds[ctx][key]
+	a := k.binds[ctx][key]
+	if a == Unbind {
+		return ""
+	}
+	return a
+}
+
+// claims reports whether the keymap explicitly owns key, including an
+// override to "none". This lets built-in multi-key motions honor an explicit
+// unbind while still using otherwise-unclaimed keys as prefixes.
+func (k KeyMap) claims(ctx, key string) bool {
+	if k.binds == nil {
+		return defaultKeyMap.claims(ctx, key)
+	}
+	_, ok := k.binds[ctx][key]
+	return ok
 }
 
 // keysFor lists the keys bound to an action, defaults first (in their declared
