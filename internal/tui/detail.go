@@ -270,14 +270,39 @@ func expandString(raw, prefix string, embedDepth int) (string, bool) {
 	}
 
 	if strings.Contains(decoded, "\n") {
+		// The decoded text is untrusted capture data. Preserve line breaks for
+		// readability, but never pass other terminal control characters through
+		// to the renderer. Normalize CRLF first so Windows line endings keep
+		// their intended layout; a lone carriage return is rendered visibly.
+		decoded = sanitizeExpandedText(strings.ReplaceAll(decoded, "\r\n", "\n"))
 		lines := strings.Split(decoded, "\n")
 		for i, ln := range lines {
-			lines[i] = jsonStrStyle.Render(strings.TrimSuffix(ln, "\r"))
+			lines[i] = jsonStrStyle.Render(ln)
 		}
 		return markExpanded("↳ expanded (escaped \\n)", strings.Join(lines, "\n"), prefix), true
 	}
 
 	return "", false
+}
+
+// sanitizeExpandedText keeps actual newlines for layout while rendering
+// terminal controls visibly. It runs before styling so it cannot alter the
+// ANSI sequences produced by our own styles.
+func sanitizeExpandedText(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteRune(r)
+		case r <= 0x1f || r == 0x7f:
+			fmt.Fprintf(&b, `\x%02X`, r)
+		case r >= 0x80 && r <= 0x9f:
+			fmt.Fprintf(&b, `\u%04X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // markExpanded prefixes every line of content with prefix plus a distinctly

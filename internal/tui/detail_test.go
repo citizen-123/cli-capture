@@ -168,6 +168,57 @@ func TestPrettyJSONExpandsEscapedNewlines(t *testing.T) {
 	}
 }
 
+func TestExpandStringRendersTerminalControlsVisibly(t *testing.T) {
+	// json.Unmarshal turns the JSON escapes below into live terminal control
+	// characters. Expanded text must preserve its line break, while rendering
+	// those controls as harmless visible escapes.
+	raw, err := json.Marshal("first line\nsecond \x1b[31mred\a\u009b1;2R")
+	if err != nil {
+		t.Fatalf("marshal expanded text: %v", err)
+	}
+
+	out, ok := expandString(string(raw), "", 0)
+	if !ok {
+		t.Fatal("escaped-newline text should expand")
+	}
+	for _, want := range []string{"first line\n", "second \\x1B[31mred\\x07\\u009B1;2R"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expanded output missing safe text %q: %q", want, out)
+		}
+	}
+	for _, control := range []string{"\x1b", "\a", "\u009b"} {
+		if strings.Contains(out, control) {
+			t.Errorf("expanded output emitted terminal control %q: %q", control, out)
+		}
+	}
+}
+
+func TestPrettyJSONExpandedEmbeddedJSONRendersTerminalControlsVisibly(t *testing.T) {
+	inner, err := json.Marshal(map[string]string{
+		"text": "first line\nsecond \x1b[31mred\a\u009b1;2R",
+	})
+	if err != nil {
+		t.Fatalf("marshal embedded JSON: %v", err)
+	}
+	body, err := json.Marshal(map[string]string{"input": string(inner)})
+	if err != nil {
+		t.Fatalf("marshal outer JSON: %v", err)
+	}
+
+	out, ok := prettyJSON(body, true)
+	if !ok {
+		t.Fatal("outer JSON should render")
+	}
+	if !strings.Contains(out, "second \\x1B[31mred\\x07\\u009B1;2R") {
+		t.Errorf("embedded JSON expansion did not render controls visibly: %q", out)
+	}
+	for _, control := range []string{"\x1b", "\a", "\u009b"} {
+		if strings.Contains(out, control) {
+			t.Errorf("embedded JSON expansion emitted terminal control %q: %q", control, out)
+		}
+	}
+}
+
 func TestPrettyJSONLeavesJSONShapedPrefixAlone(t *testing.T) {
 	// A string that merely starts with '{' but isn't valid JSON must stay a
 	// plain string — this is ordinary prose ("{not really json"), not a bug.
