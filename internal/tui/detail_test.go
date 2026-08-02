@@ -219,6 +219,44 @@ func TestPrettyJSONExpandedEmbeddedJSONRendersTerminalControlsVisibly(t *testing
 	}
 }
 
+func TestPrettyJSONExpandedEmbeddedJSONRendersC1InKeyVisibly(t *testing.T) {
+	inner := `{"key` + "\u009d" + `":"value"}`
+	body, err := json.Marshal(map[string]string{"input": inner})
+	if err != nil {
+		t.Fatalf("marshal outer JSON: %v", err)
+	}
+
+	out, ok := prettyJSON(body, true)
+	if !ok {
+		t.Fatal("outer JSON should render")
+	}
+	if !strings.Contains(out, `"key\u009D"`) {
+		t.Errorf("embedded JSON key did not render C1 visibly: %q", out)
+	}
+	if strings.Contains(out, "\u009d") {
+		t.Errorf("embedded JSON key emitted a C1 control: %q", out)
+	}
+}
+
+func TestPrettyJSONExpandedEmbeddedJSONRendersC1InSingleLineValueVisibly(t *testing.T) {
+	inner := `{"key":"value` + "\u009b" + `1;2R"}`
+	body, err := json.Marshal(map[string]string{"input": inner})
+	if err != nil {
+		t.Fatalf("marshal outer JSON: %v", err)
+	}
+
+	out, ok := prettyJSON(body, true)
+	if !ok {
+		t.Fatal("outer JSON should render")
+	}
+	if !strings.Contains(out, `"value\u009B1;2R"`) {
+		t.Errorf("embedded JSON value did not render C1 visibly: %q", out)
+	}
+	if strings.Contains(out, "\u009b") {
+		t.Errorf("embedded JSON value emitted a C1 control: %q", out)
+	}
+}
+
 func TestPrettyJSONLeavesJSONShapedPrefixAlone(t *testing.T) {
 	// A string that merely starts with '{' but isn't valid JSON must stay a
 	// plain string — this is ordinary prose ("{not really json"), not a bug.

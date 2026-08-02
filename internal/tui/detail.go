@@ -184,21 +184,22 @@ func colorizeJSON(s []byte, expand bool, embedDepth int) string {
 				j++
 			}
 			str := string(s[i:j])
+			safeStr := sanitizeExpandedText(str)
 			k := j
 			for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
 				k++
 			}
 			switch {
 			case k < len(s) && s[k] == ':':
-				b.WriteString(jsonKeyStyle.Render(str))
+				b.WriteString(jsonKeyStyle.Render(safeStr))
 			case expand:
 				if exp, ok := expandString(str, lineIndent(s, i), embedDepth); ok {
 					b.WriteString(exp)
 				} else {
-					b.WriteString(jsonStrStyle.Render(str))
+					b.WriteString(jsonStrStyle.Render(safeStr))
 				}
 			default:
-				b.WriteString(jsonStrStyle.Render(str))
+				b.WriteString(jsonStrStyle.Render(safeStr))
 			}
 			i = j
 		case c == '-' || (c >= '0' && c <= '9'):
