@@ -58,13 +58,5 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # Two test runs, because a handful of tests are excluded from the race
-      # detector by a `!race` build tag — see internal/terminal/vt_norace_test.go
-      # for which, and why. Without this first step those tests would not run in
-      # CI at all: -race sets the `race` build tag, so the tagged file drops out
-      # of the job below entirely rather than merely running unchecked.
-      - name: Test
-        run: go test ./...
-
       - name: Test (race)
         run: go test -race ./...

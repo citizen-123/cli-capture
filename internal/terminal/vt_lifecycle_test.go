@@ -1,36 +1,7 @@
-//go:build !race
-
-// Every test in this file calls VT.Close, which trips a data race that lives in
-// the emulator library rather than in this package.
-//
-// charmbracelet/x/vt's Emulator.closed is a plain bool: Close writes it
-// (emulator.go:265) while a parked Read reads it (emulator.go:252), with no
-// synchronization between them. Read blocks on an empty pipe and Close is the
-// only thing that unblocks it, so the two necessarily run concurrently and
-// there is no way to shut an emulator down that the detector accepts.
-// SafeEmulator is not an escape either: its Read deliberately takes no lock and
-// it does not override Close, so the one pair that races is the one pair the
-// wrapper doesn't cover.
-//
-// The guard is redundant rather than load-bearing, which is why the upstream fix
-// is one line: the real unblocking is pw.CloseWithError(io.EOF) on an
-// internally-synchronized io.Pipe, and `closed` is only an early-out. Tracked
-// upstream as charmbracelet/x#879, with a fix already proposed in
-// charmbracelet/x#881 (atomic.Bool). Applying that patch locally turns this
-// package's whole suite green under -race with no exclusions at all, which is
-// the evidence that nothing here is racing on its own account.
-//
-// Until that lands these tests are excluded from `go test -race` (which sets the
-// `race` build tag) and run in the plain `go test` step instead — see the two
-// Test steps in .github/workflows/ci.yml, which exist for exactly this reason.
-//
-// To remove this quarantine once the upstream fix is released: bump
-// charmbracelet/x/vt, delete this file's build tag, fold the tests back into
-// vt_test.go and vt_mouse_test.go, and drop the plain `go test` step from CI.
-
 package terminal
 
 import (
+	"errors"
 	"io"
 	"os"
 	"sync"
@@ -184,6 +155,68 @@ func TestVTCloseStopsReplyPumpWithoutLeaking(t *testing.T) {
 	}
 }
 
+// TestVTCloseCoordinatesWithPublicOperations guards VT's lifecycle boundary:
+// Close and every public operation may arrive from different goroutines, but
+// shutdown must be idempotent and must not let an operation enter x/vt while
+// the emulator is being torn down.
+//
+// Removing Close from VT's operation lock makes this test report a race on
+// VT's lifecycle state. Calling x/vt's Close from it also exposes the upstream
+// Read/Write/Close race. Removing the closed-state checks lets Write mutate the
+// emulator after shutdown instead of returning io.ErrClosedPipe.
+func TestVTCloseCoordinatesWithPublicOperations(t *testing.T) {
+	vt := NewVT(20, 5, io.Discard)
+	if _, err := vt.Write([]byte("\x1b[?1000h\x1b[?1006h")); err != nil {
+		t.Fatalf("Write(enable mouse): %v", err)
+	}
+
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var operations sync.WaitGroup
+	for range workers {
+		operations.Add(1)
+		go func() {
+			defer operations.Done()
+			<-start
+			for range 100 {
+				_, _ = vt.Write([]byte("x"))
+				vt.Resize(21, 6)
+				_ = vt.Render(20, 5)
+				vt.ForwardMouse(MouseEvent{
+					X:      1,
+					Y:      1,
+					Button: MouseButtonLeft,
+					Action: MouseActionPress,
+				})
+			}
+		}()
+	}
+	for range workers {
+		go func() {
+			<-start
+			errs <- vt.Close()
+		}()
+	}
+
+	close(start)
+	operations.Wait()
+	for range workers {
+		if err := <-errs; err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}
+
+	if n, err := vt.Write([]byte("after close")); n != 0 || !errors.Is(err, io.ErrClosedPipe) {
+		t.Errorf("Write after Close = (%d, %v), want (0, io.ErrClosedPipe)", n, err)
+	}
+	// The void operations have no error channel; their post-close contract is
+	// simply to be safe no-ops.
+	vt.Resize(40, 10)
+	_ = vt.Render(40, 10)
+	vt.ForwardMouse(MouseEvent{X: 1, Y: 1, Button: MouseButtonLeft, Action: MouseActionPress})
+}
+
 // blockingWriter parks the first Write it receives until release is closed,
 // standing in for the target's PTY once a stalled child has stopped draining
 // it. entered closes as the Write parks, so a test can wait for the pump to be
@@ -207,13 +240,13 @@ func (w *blockingWriter) Write(p []byte) (int, error) {
 // TestVTCloseReturnsWhileReplyPumpIsStuckWriting is the hang Close's bounded
 // wait exists to prevent.
 //
-// pumpReplies has two parking spots, and term.Close only reaches one of them.
-// Unblocking a pump parked in Read is what Close is built for; a pump parked in
-// resp.Write — where it sits whenever the child has stopped draining its pty —
-// cannot be woken from here at all, and darwin will not take a write deadline
-// on a pty master to fix it at the cause. Before the bound, that turned a
-// wedged child into a wedged quit: Close waited on a channel that would never
-// close.
+// pumpReplies has two parking spots, and closing the emulator's reply input
+// only reaches one of them. Unblocking a pump parked in Read is what Close is
+// built for; a pump parked in resp.Write — where it sits whenever the child has
+// stopped draining its pty — cannot be woken from here at all, and darwin will
+// not take a write deadline on a pty master to fix it at the cause. Before the
+// bound, that turned a wedged child into a wedged quit: Close waited on a
+// channel that would never close.
 //
 // The writer here blocks unconditionally rather than being a real full pty,
 // because "resp.Write never returns" is the property under test and a real pty
