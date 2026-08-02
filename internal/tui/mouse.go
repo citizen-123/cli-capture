@@ -108,11 +108,9 @@ func (m Model) onHelpMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 // onRepeaterMouse handles mouse input while the Repeater modal is up. Like the
-// help overlay it owns the whole screen, so clicks are swallowed; the wheel
-// goes to whichever section has focus, which is the same fall-through
-// onRepeaterKey uses for keys it doesn't claim. Only the response section is a
-// viewport, so in practice only that one moves — the two textarea sections
-// ignore mouse input entirely (see wheelEditor).
+// help overlay it owns the whole screen, so clicks are swallowed. Wheel input
+// is currently routed only to the response viewport; the request textarea
+// sections are left unchanged.
 func (m Model) onRepeaterMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if !tea.MouseEvent(ev).IsWheel() || m.rep.focus != repFocusResp {
 		return m, nil
@@ -301,16 +299,16 @@ func (m Model) onRightPaneWheel(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// wheelEditor preserves the raw editor's insertion point.
+// wheelEditor scrolls the raw editor without moving its insertion point.
 //
-// bubbles' textarea has no mouse handling and exposes no public way to scroll
-// its private viewport independently of its logical cursor. Turning a wheel
-// notch into up/down keys makes it look as though the editor scrolled, but it
-// also changes where the next character is inserted. Until the dependency
-// offers cursor-independent scrolling, ignore the notch rather than risking an
-// edit to a different request line.
+// bubbles' textarea forwards mouse messages to its private viewport, then
+// repositions that viewport only as needed to keep the logical cursor visible.
+// Using its native path therefore scrolls around an interior caret without
+// changing where the next character is inserted.
 func (m Model) wheelEditor(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	return m, nil
+	var cmd tea.Cmd
+	m.ta, cmd = m.ta.Update(ev)
+	return m, cmd
 }
 
 // trafficRowLayout mirrors renderTraffic's row accounting: how many rows sit

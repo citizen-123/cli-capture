@@ -423,50 +423,68 @@ func TestHelpOverlayWheelClampsAtBottom(t *testing.T) {
 	}
 }
 
-// TestEditorWheelPreservesInsertionPoint is the cursor-safety half of finding
-// 2. A raw editor can be scrolled only if doing so leaves its logical cursor
-// alone: a wheel notch must not make the next typed character land on a
-// different request line.
-func TestEditorWheelPreservesInsertionPoint(t *testing.T) {
+// TestEditorWheelScrollsWithoutMovingInsertionPoint is finding 2: bubbles'
+// textarea forwards mouse messages to its private viewport, which can scroll
+// around an interior caret without changing the logical insertion point.
+func TestEditorWheelScrollsWithoutMovingInsertionPoint(t *testing.T) {
 	lines := make([]string, 40)
 	for i := range lines {
 		lines[i] = fmt.Sprintf("line %02d", i)
 	}
-	m := editingModel(strings.Join(lines, "\n"))
-	m.ta.CursorDown()
-	m.ta.CursorEnd()
 
-	_, right := m.paneRects()
-	ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
-
-	newModel, _ := m.Update(ev)
-	got := newModel.(Model)
-	if got.ta.Line() != 1 {
-		t.Errorf("wheel down over the open editor: cursor line = %d, want 1", got.ta.Line())
+	tests := []struct {
+		name   string
+		button tea.MouseButton
+		setup  []tea.KeyType
+	}{
+		{name: "down", button: tea.MouseButtonWheelDown, setup: repeatKey(tea.KeyDown, 20)},
+		{name: "up", button: tea.MouseButtonWheelUp, setup: append(repeatKey(tea.KeyDown, 24), repeatKey(tea.KeyUp, 4)...)},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := editingModel(strings.Join(lines, "\n"))
+			for _, keyType := range tt.setup {
+				m.ta, _ = m.ta.Update(tea.KeyMsg{Type: keyType})
+			}
+			m.ta.CursorEnd()
+			beforeView := m.ta.View()
+			beforeValue := m.ta.Value()
+			beforeColumn := m.ta.LineInfo().CharOffset
 
-	newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
-	got = newModel.(Model)
-	if !strings.Contains(got.ta.Value(), "line 01X\nline 02") {
-		t.Errorf("typing after a wheel notch inserted at the wrong location:\n%s", got.ta.Value())
-	}
-	if got.selected != 0 {
-		t.Errorf("wheel over the open editor moved the flow selection to %d; the list is behind the editor", got.selected)
+			_, right := m.paneRects()
+			ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tt.button}
+			newModel, _ := m.Update(ev)
+			got := newModel.(Model)
+
+			if got.ta.View() == beforeView {
+				t.Errorf("wheel %s did not scroll the editor's visible content", tt.name)
+			}
+			if got.ta.Line() != 20 || got.ta.LineInfo().CharOffset != beforeColumn {
+				t.Errorf("wheel %s moved insertion point to line %d column %d, want line 20 column %d",
+					tt.name, got.ta.Line(), got.ta.LineInfo().CharOffset, beforeColumn)
+			}
+			if got.ta.Value() != beforeValue {
+				t.Errorf("wheel %s changed editor value", tt.name)
+			}
+
+			newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+			got = newModel.(Model)
+			if !strings.Contains(got.ta.Value(), "line 20X\nline 21") {
+				t.Errorf("typing after wheel %s inserted at the wrong location:\n%s", tt.name, got.ta.Value())
+			}
+			if got.selected != 0 {
+				t.Errorf("wheel over the open editor moved the flow selection to %d; the list is behind the editor", got.selected)
+			}
+		})
 	}
 }
 
-// TestEditorWheelUpClampsAtFirstLine checks the wheel can't walk the cursor off
-// the top of the editor.
-func TestEditorWheelUpClampsAtFirstLine(t *testing.T) {
-	m := editingModel("line 0\nline 1\nline 2")
-
-	_, right := m.paneRects()
-	ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp}
-
-	newModel, _ := m.Update(ev)
-	if got := newModel.(Model).ta.Line(); got != 0 {
-		t.Errorf("wheel up at the first line of the editor: cursor line = %d, want 0", got)
+func repeatKey(keyType tea.KeyType, n int) []tea.KeyType {
+	keys := make([]tea.KeyType, n)
+	for i := range keys {
+		keys[i] = keyType
 	}
+	return keys
 }
 
 // TestOnMouseRightPaneWheelScrollsViewportWhenViewing checks the detail-view
