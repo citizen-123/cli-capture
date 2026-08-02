@@ -108,15 +108,24 @@ func (m Model) onHelpMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 // onRepeaterMouse handles mouse input while the Repeater modal is up. Like the
-// help overlay it owns the whole screen, so clicks are swallowed. Wheel input
-// is currently routed only to the response viewport; the request textarea
-// sections are left unchanged.
+// help overlay it owns the whole screen, so clicks are swallowed; the wheel
+// goes to whichever section has focus, which is the same fall-through
+// onRepeaterKey uses for keys it doesn't claim. textarea forwards MouseMsg to
+// its private viewport and then keeps the logical cursor visible, so Request
+// and Payload scroll without changing where the next character is inserted.
 func (m Model) onRepeaterMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if !tea.MouseEvent(ev).IsWheel() || m.rep.focus != repFocusResp {
+	if !tea.MouseEvent(ev).IsWheel() {
 		return m, nil
 	}
 	var cmd tea.Cmd
-	m.rep.respVP, cmd = m.rep.respVP.Update(ev)
+	switch m.rep.focus {
+	case repFocusReq:
+		m.rep.req, cmd = m.rep.req.Update(ev)
+	case repFocusPayload:
+		m.rep.payload, cmd = m.rep.payload.Update(ev)
+	case repFocusResp:
+		m.rep.respVP, cmd = m.rep.respVP.Update(ev)
+	}
 	return m, cmd
 }
 

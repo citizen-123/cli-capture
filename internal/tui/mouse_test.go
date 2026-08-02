@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -420,6 +421,110 @@ func TestHelpOverlayWheelClampsAtBottom(t *testing.T) {
 	newModel, _ := m.Update(ev)
 	if got := newModel.(Model).helpScroll; got != max {
 		t.Errorf("wheel down at the bottom of the help overlay: helpScroll = %d, want it clamped at %d", got, max)
+	}
+}
+
+// repeaterWheelTextarea builds a five-row editor whose cursor is on line 10
+// while its viewport is already following that cursor. A native wheel-down
+// message can therefore move the visible window without moving the insertion
+// point; starting at a boundary would let a broken cursor-moving translation
+// pass silently by clamping.
+func repeaterWheelTextarea(prefix string) textarea.Model {
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("%s %02d", prefix, i)
+	}
+	ta := newEditor()
+	ta.SetWidth(40)
+	ta.SetHeight(5)
+	ta.SetValue(strings.Join(lines, "\n"))
+	ta.Focus()
+	for ta.Line() > 0 {
+		ta.CursorUp()
+	}
+	for i := 0; i < 10; i++ {
+		ta, _ = ta.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	ta.CursorEnd()
+	return ta
+}
+
+// TestRepeaterWheelScrollsFocusedTextareaWithoutMovingCaret guards both
+// editable Repeater sections. The wheel must reach the focused textarea's
+// native viewport handling: rendered content changes, but a subsequent typed
+// character still lands at the original line and column.
+func TestRepeaterWheelScrollsFocusedTextareaWithoutMovingCaret(t *testing.T) {
+	tests := []struct {
+		name       string
+		focus      int
+		focused    func(Model) textarea.Model
+		wantInsert string
+	}{
+		{
+			name:       "request",
+			focus:      repFocusReq,
+			focused:    func(m Model) textarea.Model { return m.rep.req },
+			wantInsert: "request 10X\nrequest 11",
+		},
+		{
+			name:       "payload",
+			focus:      repFocusPayload,
+			focused:    func(m Model) textarea.Model { return m.rep.payload },
+			wantInsert: "payload 10X\npayload 11",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := repeaterWheelTextarea("request")
+			payload := repeaterWheelTextarea("payload")
+			if tc.focus == repFocusReq {
+				payload.Blur()
+			} else {
+				req.Blur()
+			}
+			m := Model{
+				width: 100, height: 40, repeating: true,
+				rep: repeaterState{req: req, payload: payload, respVP: viewport.New(40, 5), focus: tc.focus},
+			}
+
+			before := tc.focused(m)
+			beforeView := before.View()
+			beforeLine := before.Line()
+			beforeCol := before.LineInfo().CharOffset
+			ev := tea.MouseMsg{X: 10, Y: 10, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
+
+			newModel, _ := m.Update(ev)
+			got := newModel.(Model)
+			after := tc.focused(got)
+			if afterView := after.View(); afterView == beforeView {
+				t.Fatal("wheel down did not change the focused textarea's visible window")
+			}
+			if after.Line() != beforeLine || after.LineInfo().CharOffset != beforeCol {
+				t.Fatalf("wheel moved caret from line/column %d/%d to %d/%d",
+					beforeLine, beforeCol, after.Line(), after.LineInfo().CharOffset)
+			}
+
+			newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+			got = newModel.(Model)
+			if value := tc.focused(got).Value(); !strings.Contains(value, tc.wantInsert) {
+				t.Fatalf("typing after wheel inserted at the wrong location:\n%s", value)
+			}
+		})
+	}
+}
+
+// TestRepeaterWheelStillScrollsResponseViewport protects the existing third
+// focus target while Request and Payload gain native textarea routing.
+func TestRepeaterWheelStillScrollsResponseViewport(t *testing.T) {
+	vp := viewport.New(40, 3)
+	vp.SetContent(strings.Join([]string{"r0", "r1", "r2", "r3", "r4", "r5", "r6"}, "\n"))
+	m := Model{width: 100, height: 40, repeating: true, rep: repeaterState{respVP: vp, focus: repFocusResp}}
+
+	ev := tea.MouseMsg{X: 10, Y: 10, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
+	newModel, _ := m.Update(ev)
+	if got := newModel.(Model).rep.respVP.YOffset; got != wheelLines {
+		t.Fatalf("response wheel offset = %d, want %d", got, wheelLines)
 	}
 }
 
