@@ -237,38 +237,99 @@ func (w *blockingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestVTCloseReturnsWhileReplyPumpIsStuckWriting is the hang Close's bounded
-// wait exists to prevent.
-//
-// pumpReplies has two parking spots, and closing the emulator's reply input
-// only reaches one of them. Unblocking a pump parked in Read is what Close is
-// built for; a pump parked in resp.Write — where it sits whenever the child has
-// stopped draining its pty — cannot be woken from here at all, and darwin will
-// not take a write deadline on a pty master to fix it at the cause. Before the
-// bound, that turned a wedged child into a wedged quit: Close waited on a
-// channel that would never close.
-//
-// The writer here blocks unconditionally rather than being a real full pty,
-// because "resp.Write never returns" is the property under test and a real pty
-// only reaches that state by timing.
-func TestVTCloseReturnsWhileReplyPumpIsStuckWriting(t *testing.T) {
-	w := newBlockingWriter()
-	defer close(w.release) // let the abandoned pump exit before the test binary does
+// failingWriter reports one attempted write and rejects it. A PTY master
+// normally reaches this state after the child exits or its descriptor closes.
+type failingWriter struct {
+	entered chan struct{}
+	once    sync.Once
+}
 
-	vt := NewVT(20, 5, w)
+func newFailingWriter() *failingWriter {
+	return &failingWriter{entered: make(chan struct{})}
+}
 
-	// Make the emulator produce bytes so the pump has something to write. A
-	// click is only emitted once the child has asked for mouse tracking, so
-	// enable it first (the same setup the ForwardMouse tests use).
-	if _, err := vt.Write([]byte("\x1b[?1000h\x1b[?1006h")); err != nil {
-		t.Fatalf("Write(enable mouse): %v", err)
+func (w *failingWriter) Write([]byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	return 0, errors.New("target PTY is closed")
+}
+
+// gatedRecordingWriter parks its first Write until release is closed, then
+// records that write and every later one. writes is deliberately larger than
+// the reply FIFO exercised below, so the test itself never applies backpressure
+// after releasing the simulated PTY.
+type gatedRecordingWriter struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+	writes  chan []byte
+}
+
+func newGatedRecordingWriter(capacity int) *gatedRecordingWriter {
+	return &gatedRecordingWriter{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		writes:  make(chan []byte, capacity),
 	}
-	vt.ForwardMouse(MouseEvent{X: 4, Y: 2, Button: MouseButtonLeft, Action: MouseActionPress})
+}
 
+func (w *gatedRecordingWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() {
+		close(w.entered)
+		<-w.release
+	})
+	b := append([]byte(nil), p...)
+	w.writes <- b
+	return len(p), nil
+}
+
+func writeVTWithin(v *VT, p string, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := v.Write([]byte(p))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		return errors.New("VT.Write blocked")
+	}
+}
+
+// TestVTCloseReturnsAfterSecondReplyWithStalledWriter covers the complete hang
+// sequence Close's bounded wait and the decoupled emulator drain prevent.
+//
+// The reply drain and target writer are now separate, so Close can stop a drain
+// parked in Read and a writer parked on its queue. The one parking spot it
+// still cannot wake is the external resp.Write call itself, where the writer
+// sits whenever the child has stopped draining its PTY. Darwin will not take a
+// write deadline on a PTY master to fix that at the cause. Waiting without a
+// bound there turns a wedged child into a wedged quit.
+//
+// The second query is essential: it proves the emulator's sole pipe reader is
+// still draining after the first reply parks in resp.Write. Close must then
+// return within its bound while that external write remains stalled. The writer
+// blocks unconditionally because a real full PTY only reaches that state by
+// timing.
+func TestVTCloseReturnsAfterSecondReplyWithStalledWriter(t *testing.T) {
+	w := newBlockingWriter()
+	vt := NewVT(20, 5, w)
+	defer func() {
+		close(w.release)
+		_ = vt.Close()
+	}()
+
+	if err := writeVTWithin(vt, "\x1b[5n", time.Second); err != nil {
+		t.Fatalf("initial device-status query: %v", err)
+	}
 	select {
 	case <-w.entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reply pump never reached resp.Write; the test never set up the condition it means to check")
+	case <-time.After(time.Second):
+		t.Fatal("reply forwarding never parked in resp.Write")
+	}
+
+	if err := writeVTWithin(vt, "\x1b[3;4H\x1b[6n", time.Second); err != nil {
+		t.Fatalf("second query with stalled reply writer: %v; emulator drain stopped behind resp.Write", err)
 	}
 
 	done := make(chan error, 1)
@@ -279,8 +340,184 @@ func TestVTCloseReturnsWhileReplyPumpIsStuckWriting(t *testing.T) {
 		if err != nil {
 			t.Errorf("Close: %v", err)
 		}
-	case <-time.After(closeGrace + 5*time.Second):
-		t.Fatal("Close did not return with the reply pump stuck in resp.Write — quitting the TUI would hang")
+	case <-time.After(closeGrace + time.Second):
+		t.Fatal("Close did not return within its bound after a second reply with resp.Write stalled")
+	}
+}
+
+// TestVTWriteErrorDoesNotStopEmulatorDrain guards the x/vt pipe's single-reader
+// invariant. A target PTY write error may stop forwarding, but it must not stop
+// the goroutine draining the emulator: query replies and mouse reports write to
+// an unbuffered io.Pipe, and without that reader every later producer blocks.
+func TestVTWriteErrorDoesNotStopEmulatorDrain(t *testing.T) {
+	w := newFailingWriter()
+	vt := NewVT(20, 5, w)
+	defer vt.Close() //nolint:errcheck
+
+	if err := writeVTWithin(vt, "\x1b[5n", time.Second); err != nil {
+		t.Fatalf("first device-status query: %v", err)
+	}
+	select {
+	case <-w.entered:
+	case <-time.After(time.Second):
+		t.Fatal("reply forwarding never reached the failing target writer")
+	}
+
+	if err := writeVTWithin(vt, "\x1b[5n", time.Second); err != nil {
+		t.Fatalf("query after target write error: %v; the emulator's sole pipe reader stopped", err)
+	}
+
+	if _, err := vt.Write([]byte("\x1b[?1000h\x1b[?1006h")); err != nil {
+		t.Fatalf("enable mouse after target write error: %v", err)
+	}
+	mouseDone := make(chan struct{})
+	go func() {
+		vt.ForwardMouse(MouseEvent{X: 4, Y: 2, Button: MouseButtonLeft, Action: MouseActionPress})
+		close(mouseDone)
+	}()
+	select {
+	case <-mouseDone:
+	case <-time.After(time.Second):
+		t.Fatal("ForwardMouse blocked after target write error; the Bubble Tea update loop would freeze")
+	}
+}
+
+// TestVTStalledTargetDropsNewestRepliesAtBoundedCapacity proves both sides of
+// the saturation policy. The first write is already parked in resp.Write; the
+// next 64 chunks fill the fixed FIFO exactly; the following 8 cursor replies and
+// one mouse report are the newest and must be dropped. Every synchronous query
+// and ForwardMouse call must still return because pumpReplies remains available
+// to drain x/vt's unbuffered pipe.
+//
+// Once the target resumes, the writer receives the in-flight chunk followed by
+// the 64 queued chunks in FIFO order, but none of the 8 overflow chunks. A
+// distinct cursor-position query then proves forwarding recovers after the
+// backlog drains.
+func TestVTStalledTargetDropsNewestRepliesAtBoundedCapacity(t *testing.T) {
+	const (
+		replyFIFOSize = 64
+		overflow      = 8
+	)
+	w := newGatedRecordingWriter(replyFIFOSize + 2)
+	vt := NewVT(20, 5, w)
+	released := false
+	defer func() {
+		if !released {
+			close(w.release)
+		}
+		_ = vt.Close()
+	}()
+
+	if err := writeVTWithin(vt, "\x1b[5n", time.Second); err != nil {
+		t.Fatalf("initial device-status query: %v", err)
+	}
+	select {
+	case <-w.entered:
+	case <-time.After(time.Second):
+		t.Fatal("reply forwarding never parked in the target writer")
+	}
+
+	if _, err := vt.Write([]byte("\x1b[?1000h\x1b[?1006h")); err != nil {
+		t.Fatalf("enable mouse with stalled target: %v", err)
+	}
+	for i := 0; i < replyFIFOSize; i++ {
+		if err := writeVTWithin(vt, "\x1b[5n", time.Second); err != nil {
+			t.Fatalf("device-status query %d with stalled target: %v", i+1, err)
+		}
+	}
+	for i := 0; i < overflow; i++ {
+		// Cursor replies are observably different from the retained status
+		// replies. If saturation evicted the oldest chunks instead of dropping
+		// these newest ones, the assertion below would see one here.
+		if err := writeVTWithin(vt, "\x1b[2;7H\x1b[6n", time.Second); err != nil {
+			t.Fatalf("overflow cursor-position query %d with stalled target: %v", i+1, err)
+		}
+	}
+	uiDone := make(chan struct{})
+	go func() {
+		vt.ForwardMouse(MouseEvent{X: 4, Y: 2, Button: MouseButtonLeft, Action: MouseActionPress})
+		vt.Render(20, 5)
+		close(uiDone)
+	}()
+	select {
+	case <-uiDone:
+	case <-time.After(time.Second):
+		t.Fatal("ForwardMouse or Render blocked with a saturated reply FIFO; the Bubble Tea UI would freeze")
+	}
+
+	close(w.release)
+	released = true
+
+	for i := 0; i < 1+replyFIFOSize; i++ {
+		select {
+		case got := <-w.writes:
+			if want := "\x1b[?0n"; string(got) != want {
+				t.Fatalf("forwarded reply %d = %q, want %q", i+1, got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("received only %d of %d retained replies", i, 1+replyFIFOSize)
+		}
+	}
+
+	if err := writeVTWithin(vt, "\x1b[3;4H\x1b[6n", time.Second); err != nil {
+		t.Fatalf("cursor-position query after target resumed: %v", err)
+	}
+	select {
+	case got := <-w.writes:
+		if want := "\x1b[3;4R"; string(got) != want {
+			t.Fatalf("first reply after retained FIFO = %q, want %q; overflow replies were not dropped newest", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("forwarding did not recover after the stalled target resumed")
+	}
+}
+
+// TestVTRepliesStayOrderedWhenTargetIsHealthy pins the property the bounded
+// hand-off must preserve: the one forwarding goroutine writes reply chunks in
+// exactly the order x/vt produced them.
+func TestVTRepliesStayOrderedWhenTargetIsHealthy(t *testing.T) {
+	w := newGatedRecordingWriter(3)
+	close(w.release)
+	vt := NewVT(20, 5, w)
+	defer vt.Close() //nolint:errcheck
+
+	queries := []string{
+		"\x1b[5n",
+		"\x1b[3;4H\x1b[6n",
+		"\x1b[2;7H\x1b[6n",
+	}
+	want := []string{
+		"\x1b[?0n",
+		"\x1b[3;4R",
+		"\x1b[2;7R",
+	}
+	for i, query := range queries {
+		if err := writeVTWithin(vt, query, time.Second); err != nil {
+			t.Fatalf("query %d: %v", i+1, err)
+		}
+	}
+	for i, expected := range want {
+		select {
+		case got := <-w.writes:
+			if string(got) != expected {
+				t.Fatalf("reply %d = %q, want %q", i+1, got, expected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("reply %d did not arrive", i+1)
+		}
+	}
+}
+
+// TestVTCloseCanBeCalledMoreThanOnce protects the shutdown signal used by the
+// reply writer: repeated ownership cleanup must not close the same channel
+// twice and panic.
+func TestVTCloseCanBeCalledMoreThanOnce(t *testing.T) {
+	vt := NewVT(10, 2, io.Discard)
+	if err := vt.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := vt.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
 	}
 }
 
