@@ -121,7 +121,10 @@ func (v *VT) pumpReplies() {
 			select {
 			case v.replies <- reply:
 			default:
-				log.Printf("Dropping newest terminal reply chunk (%d bytes): target PTY has not drained the %d-chunk FIFO.", n, replyFIFOSize)
+				// Drop silently. Logging here would synchronously call another
+				// arbitrary io.Writer from the sole emulator-pipe reader, recreating
+				// the deadlock this non-blocking hand-off exists to prevent. A mouse
+				// event storm would also turn saturation into log amplification.
 			}
 		}
 		if err != nil {

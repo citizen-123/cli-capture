@@ -3,6 +3,7 @@ package terminal
 import (
 	"errors"
 	"io"
+	"log"
 	"os"
 	"sync"
 	"testing"
@@ -469,6 +470,67 @@ func TestVTStalledTargetDropsNewestRepliesAtBoundedCapacity(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("forwarding did not recover after the stalled target resumed")
+	}
+}
+
+// TestVTSaturatedReplyDrainDoesNotBlockOnLogging guards the drain's other
+// output boundary. Once the target writer parks and the 64-chunk FIFO fills,
+// dropping a chunk must not synchronously write telemetry: the process logger
+// is an arbitrary io.Writer too, and a slow log file would otherwise replace
+// the PTY deadlock with the same deadlock one line later. Repeated mouse reports
+// would also amplify one stalled target into unbounded log traffic.
+func TestVTSaturatedReplyDrainDoesNotBlockOnLogging(t *testing.T) {
+	const replyFIFOSize = 64
+
+	oldLogOutput := log.Writer()
+	blockedLog := newBlockingWriter()
+	log.SetOutput(blockedLog)
+
+	target := newBlockingWriter()
+	vt := NewVT(20, 5, target)
+	defer func() {
+		// log.Logger holds its mutex across Output.Write, so unblock that Write
+		// before asking SetOutput to take the mutex and restore global state.
+		close(blockedLog.release)
+		log.SetOutput(oldLogOutput)
+		close(target.release)
+		_ = vt.Close()
+	}()
+
+	if err := writeVTWithin(vt, "\x1b[5n", time.Second); err != nil {
+		t.Fatalf("initial device-status query: %v", err)
+	}
+	select {
+	case <-target.entered:
+	case <-time.After(time.Second):
+		t.Fatal("reply forwarding never parked in the target writer")
+	}
+
+	for i := 0; i < replyFIFOSize; i++ {
+		if err := writeVTWithin(vt, "\x1b[5n", time.Second); err != nil {
+			t.Fatalf("device-status query %d while filling FIFO: %v", i+1, err)
+		}
+	}
+	// This reply is the first newest chunk dropped at capacity. Against the
+	// regression it parks the sole emulator reader in log.Printf.
+	if err := writeVTWithin(vt, "\x1b[2;7H\x1b[6n", time.Second); err != nil {
+		t.Fatalf("first overflow query: %v", err)
+	}
+
+	select {
+	case <-blockedLog.entered:
+		// Continue: the next query below proves whether parking the logger also
+		// parked the sole emulator reader.
+	case <-time.After(100 * time.Millisecond):
+		// No synchronous drop log is the desired implementation.
+	}
+	if err := writeVTWithin(vt, "\x1b[3;4H\x1b[6n", time.Second); err != nil {
+		t.Fatalf("query after saturated drop: %v; drop telemetry blocked the emulator drain", err)
+	}
+	select {
+	case <-blockedLog.entered:
+		t.Fatal("saturated reply drop synchronously wrote to the process logger")
+	default:
 	}
 }
 
