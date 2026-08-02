@@ -381,6 +381,52 @@ func TestModalStatesSwallowClicksBehindThem(t *testing.T) {
 	}
 }
 
+func TestDetailModalKeepsFocusAndSwallowsLeftPaneClick(t *testing.T) {
+	screen := &fakeEmulator{}
+	m := modalModel(screen)
+	m.focus = focusTraffic
+	m.viewing = true
+	left, _ := m.paneRects()
+	ev := tea.MouseMsg{X: left.X + 2, Y: left.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+
+	newModel, _ := m.Update(ev)
+	got := newModel.(Model)
+	if got.focus != focusTraffic {
+		t.Errorf("left click while detail is open changed focus to %v, want traffic", got.focus)
+	}
+	if len(screen.forwarded) != 0 {
+		t.Errorf("left click while detail is open reached the child: %+v", screen.forwarded)
+	}
+
+	newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if newModel.(Model).viewing {
+		t.Error("detail did not retain keyboard ownership after the left click")
+	}
+}
+
+func TestEditorModalKeepsFocusAndSwallowsLeftPaneClick(t *testing.T) {
+	screen := &fakeEmulator{}
+	m := editingModel("request")
+	m.screen = screen
+	m.focus = focusTraffic
+	left, _ := m.paneRects()
+	ev := tea.MouseMsg{X: left.X + 2, Y: left.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+
+	newModel, _ := m.Update(ev)
+	got := newModel.(Model)
+	if got.focus != focusTraffic {
+		t.Errorf("left click while editor is open changed focus to %v, want traffic", got.focus)
+	}
+	if len(screen.forwarded) != 0 {
+		t.Errorf("left click while editor is open reached the child: %+v", screen.forwarded)
+	}
+
+	newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	if value := newModel.(Model).ta.Value(); value != "requestX" {
+		t.Errorf("editor did not retain keyboard ownership after the left click: value = %q", value)
+	}
+}
+
 // TestHelpOverlayWheelScrolls is the routing half of the help gate: the overlay
 // swallows clicks, but the body runs well past a screen, so the wheel has to
 // scroll it the way j/k do in onHelpKey — including the same clamp at the top.

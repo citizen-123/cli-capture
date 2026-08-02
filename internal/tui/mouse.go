@@ -56,9 +56,10 @@ func contentGrid(box rect) (cols, rows int) {
 //   - filtering and cmdline leave both panes drawn, but a focused text input
 //     owns the input stream — no keystroke reaches a pane while one is open, so
 //     no click should either.
-//   - editing and viewing replace only the RIGHT pane's content; the terminal
-//     pane is still drawn and still live. They stay pane-local in
-//     onRightPaneMouse rather than swallowing input meant for the left pane.
+//   - editing and viewing replace the RIGHT pane's content and own the keyboard
+//     stream. Mouse input can still reach that visible right-pane content, but
+//     the left pane stays inactive so its border cannot claim a focus that
+//     keyboard routing does not honor.
 func (m Model) onMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.width == 0 {
 		return m, nil // nothing has been sized/drawn yet
@@ -74,6 +75,9 @@ func (m Model) onMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	left, right := m.paneRects()
 	switch {
 	case left.contains(ev.X, ev.Y):
+		if m.editing || m.viewing {
+			return m, nil
+		}
 		return m.onLeftPaneMouse(ev, left)
 	case right.contains(ev.X, ev.Y):
 		return m.onRightPaneMouse(ev, right)
