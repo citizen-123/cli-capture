@@ -301,36 +301,16 @@ func (m Model) onRightPaneWheel(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// wheelEditor scrolls the raw-request editor by one notch.
+// wheelEditor preserves the raw editor's insertion point.
 //
-// It cannot just hand the event to m.ta.Update: bubbles' textarea has no mouse
-// handling at all — unlike viewport, which is why the detail view above can
-// forward the message verbatim — so doing that would compile, run, and
-// silently scroll nothing. Translating the notch into the up/down keys the
-// textarea does bind walks the cursor, and the textarea slides its own window
-// to keep the cursor visible. It is the same move wheelPageKey makes on the
-// terminal pane, where a notch becomes PgUp/PgDn.
+// bubbles' textarea has no mouse handling and exposes no public way to scroll
+// its private viewport independently of its logical cursor. Turning a wheel
+// notch into up/down keys makes it look as though the editor scrolled, but it
+// also changes where the next character is inserted. Until the dependency
+// offers cursor-independent scrolling, ignore the notch rather than risking an
+// edit to a different request line.
 func (m Model) wheelEditor(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if ev.Action != tea.MouseActionPress {
-		return m, nil
-	}
-	var key tea.KeyMsg
-	switch ev.Button {
-	case tea.MouseButtonWheelUp:
-		key = tea.KeyMsg{Type: tea.KeyUp}
-	case tea.MouseButtonWheelDown:
-		key = tea.KeyMsg{Type: tea.KeyDown}
-	default:
-		return m, nil // a horizontal notch has no line to move to
-	}
-	// Only the last command survives on purpose. Each Update that moves the
-	// cursor returns a fresh cursor-blink timer, so batching all three would
-	// leave two stray timers racing to toggle the cursor.
-	var cmd tea.Cmd
-	for i := 0; i < wheelLines; i++ {
-		m.ta, cmd = m.ta.Update(key)
-	}
-	return m, cmd
+	return m, nil
 }
 
 // trafficRowLayout mirrors renderTraffic's row accounting: how many rows sit

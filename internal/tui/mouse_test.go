@@ -423,25 +423,32 @@ func TestHelpOverlayWheelClampsAtBottom(t *testing.T) {
 	}
 }
 
-// TestEditorWheelScrollsEditorNotTrafficList is finding 2: the click path
-// guarded on m.editing but the wheel path guarded only on m.viewing, so a notch
-// over the open editor moved the flow selection hidden underneath it. The wheel
-// now walks the editor instead.
-func TestEditorWheelScrollsEditorNotTrafficList(t *testing.T) {
+// TestEditorWheelPreservesInsertionPoint is the cursor-safety half of finding
+// 2. A raw editor can be scrolled only if doing so leaves its logical cursor
+// alone: a wheel notch must not make the next typed character land on a
+// different request line.
+func TestEditorWheelPreservesInsertionPoint(t *testing.T) {
 	lines := make([]string, 40)
 	for i := range lines {
 		lines[i] = fmt.Sprintf("line %02d", i)
 	}
 	m := editingModel(strings.Join(lines, "\n"))
+	m.ta.CursorDown()
+	m.ta.CursorEnd()
 
 	_, right := m.paneRects()
 	ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
 
 	newModel, _ := m.Update(ev)
 	got := newModel.(Model)
-	if got.ta.Line() != wheelLines {
-		t.Errorf("wheel down over the open editor: cursor line = %d, want %d — the editor did not scroll",
-			got.ta.Line(), wheelLines)
+	if got.ta.Line() != 1 {
+		t.Errorf("wheel down over the open editor: cursor line = %d, want 1", got.ta.Line())
+	}
+
+	newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	got = newModel.(Model)
+	if !strings.Contains(got.ta.Value(), "line 01X\nline 02") {
+		t.Errorf("typing after a wheel notch inserted at the wrong location:\n%s", got.ta.Value())
 	}
 	if got.selected != 0 {
 		t.Errorf("wheel over the open editor moved the flow selection to %d; the list is behind the editor", got.selected)
