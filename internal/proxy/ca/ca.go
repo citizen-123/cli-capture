@@ -38,6 +38,12 @@ func LoadOrCreate(dir string) (*CA, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// MkdirAll leaves an existing directory's mode alone, so a dir the user
+	// created by hand arrives as 0755 under the usual umask. This dir holds the
+	// CA key and captured credentials; narrow it either way.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, err
+	}
 	certPath := filepath.Join(dir, "ca.pem")
 	keyPath := filepath.Join(dir, "ca.key")
 

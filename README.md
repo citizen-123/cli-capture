@@ -183,6 +183,7 @@ Everything after `--` is the target program to launch and monitor.
 | `-mitm <specs>` | *(all)* | MITM (decrypt) only these TLS hosts. |
 | `-no-mitm <specs>` | — | Pass these TLS hosts through **without** decrypting (blind tunnel, still logged). |
 | `-load <file>` | — | Preload a saved capture session (JSON) into the flow list. |
+| `-leader <key>` | `ctrl+a` | Prefix key for cli-capture's own commands. `ctrl+a` … `ctrl+z`, or `ctrl+space`. Move it if your target app needs the default. |
 | `-transparent <addr>` | off | Also run a transparent-redirect listener at this address (Linux, needs root + nftables/iptables). |
 | `-transparent-uid <uid>` | `-1` | The uid whose traffic the redirect rule targets. |
 | `-transparent-apply` | off | Actually install/remove the redirect rules (needs root); otherwise they're just logged for you to run. |
@@ -226,17 +227,29 @@ own keys — only the leader is intercepted (press it twice to send a literal
 and every binding below are configurable — see
 [docs/configuration.md](docs/configuration.md).
 
-**Global — `Ctrl+A` then:**
+If your target app wants `Ctrl+A` — readline's beginning-of-line, or tmux itself
+— move the leader instead of fighting it. Set `keys.leader` in your config to any
+`ctrl+a` … `ctrl+z`; the help overlay follows whatever you pick, and the rebound
+key is released back to the target.
+
+**Global — leader then:**
 
 | Key | Action |
 |---|---|
 | `w` | switch pane (terminal ⇄ traffic) |
+| `<` / `>` | shrink / grow the terminal pane |
 | `i` / `r` | toggle intercept: requests / responses |
 | `s` | save session to JSON |
 | `h` | export session as HAR |
 | `f` | export flagged flows → `flagged.txt` |
+| `m` | toggle mouse capture (off restores native text selection) |
 | `?` | toggle help |
 | `q` | quit |
+
+With mouse capture on (the default), clicks move pane focus and select flows —
+clicking the already-selected flow opens it — and the wheel scrolls the traffic
+list or pages the hosted app. Toggle it off (`leader m`) to use your terminal's
+own text selection and copy-paste.
 
 **Traffic pane** (plain keys — it never forwards to the target):
 

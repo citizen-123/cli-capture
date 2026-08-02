@@ -83,13 +83,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Log to a file, not the screen — the TUI owns stdout.
-	logf, _ := os.Create(filepath.Join(*confDir, "cli-capture.log"))
-	if logf != nil {
-		log.SetOutput(logf)
-		defer logf.Close()
-	}
-
 	// User configuration: theme and keymap. Loaded before anything renders, and
 	// fatal on error — a config that half-applied would be worse than a refusal.
 	cfg, err := config.Load(configs, *confDir)
@@ -123,6 +116,16 @@ func main() {
 	if err != nil {
 		fatal("ca: %v", err)
 	}
+
+	// Log to a file, not the screen — the TUI owns stdout. This has to come
+	// after ca.LoadOrCreate: that is what creates confDir, so opening the log
+	// any earlier fails on a first run and every log line lands on the TUI.
+	logf, err := os.Create(filepath.Join(*confDir, "cli-capture.log"))
+	if err != nil {
+		fatal("open log %s: %v", filepath.Join(*confDir, "cli-capture.log"), err)
+	}
+	log.SetOutput(logf)
+	defer logf.Close()
 	caFile := filepath.Join(*confDir, "ca.pem")
 
 	store := capture.NewStore()
@@ -211,10 +214,18 @@ func main() {
 	}
 	defer target.Close()
 
-	// Feeds bridging the plumbing to the UI's Elm loop. A full VT emulator (not
-	// the line buffer) so full-screen TUI targets render correctly; its query
-	// replies go back to the target's PTY input.
+	// Feeds bridging the plumbing to the UI's Elm loop. A full VT emulator so
+	// full-screen TUI targets render correctly; its query replies (and
+	// forwarded mouse events) go back to the target's PTY input. Closing it
+	// stops its reply-pump goroutine; do that before target.Close() (which
+	// runs first, since defers are LIFO) so nothing writes to the PTY after
+	// it's gone.
 	screen := terminal.NewVT(80, 24, target.Pty)
+	defer func() {
+		if err := screen.Close(); err != nil {
+			log.Printf("Encountered %v while closing the terminal emulator.", err)
+		}
+	}()
 	ptyCh := make(chan struct{}, 1)
 	pauseCh := make(chan tui.Paused, 16)
 
@@ -226,7 +237,9 @@ func main() {
 
 	feeds := tui.Feeds{Events: store.Subscribe(), Pty: ptyCh, Pause: pauseCh}
 	model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json")).WithKeys(keys)
-	prog := tea.NewProgram(model, tea.WithAltScreen())
+	// WithMouseCellMotion enables mouse reporting; the model's mouseCapture
+	// toggle (leader m) flips it at runtime for native text selection.
+	prog := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	// Quit the UI when the child exits.
 	go func() {

@@ -26,6 +26,7 @@ const (
 	ActSessionSave        Action = "session.save"
 	ActExportHAR          Action = "export.har"
 	ActExportFlagged      Action = "export.flagged"
+	ActMouseCapture       Action = "mouse.capture"
 	ActExportCurl         Action = "export.curl"
 	ActHelpToggle         Action = "help.toggle"
 	ActQuit               Action = "app.quit"
@@ -101,6 +102,7 @@ var defaults = map[string][]binding{
 		{ActSessionSave, []string{"s"}, "save session to JSON"},
 		{ActExportHAR, []string{"h"}, "export session as HAR"},
 		{ActExportFlagged, []string{"f"}, "export flagged flows → flagged.txt"},
+		{ActMouseCapture, []string{"m"}, "toggle mouse capture (off restores native text selection)"},
 		{ActHelpToggle, []string{"?"}, "toggle this help"},
 		{ActQuit, []string{"q"}, "quit"},
 	},

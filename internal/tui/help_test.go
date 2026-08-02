@@ -19,6 +19,7 @@ func TestHelpViewCoversShortcuts(t *testing.T) {
 		"inject",
 		"Content-Length",
 		"close",
+		"mouse capture",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help view missing %q", want)

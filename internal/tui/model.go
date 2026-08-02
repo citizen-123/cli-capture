@@ -84,7 +84,12 @@ type Model struct {
 	splitRatio    float64 // fraction of the width given to the left (terminal) pane
 	sessionPath   string  // where "save session" writes
 	status        string
-	keys          KeyMap // key → action bindings; zero value means the defaults
+	// mouseCapture tracks whether cli-capture is asking bubbletea to report
+	// mouse events. Capturing the mouse steals native terminal-emulator text
+	// selection/copy-paste, so the operator needs a way to hand it back
+	// without restarting — see the leader mouse-capture command.
+	mouseCapture bool
+	keys         KeyMap // key → action bindings; zero value means the defaults
 }
 
 // WithKeys returns the model using km for dispatch and for the help overlay.
@@ -127,7 +132,10 @@ func New(store *capture.Store, engine *intercept.Engine, target *runner.Target, 
 		ci:          newCommandLine(),
 		splitRatio:  0.5,
 		sessionPath: sessionPath,
-		status:      "? for help · Ctrl+A w switch pane · Ctrl+A < > resize · Ctrl+A i arm intercept · Ctrl+A q quit",
+		// main.go starts the tea.Program with tea.WithMouseCellMotion(); this
+		// mirrors that so the mouse-capture toggle's first press turns capture off.
+		mouseCapture: true,
+		status:       "? for help · Ctrl+A w switch pane · Ctrl+A < > resize · Ctrl+A i arm intercept · Ctrl+A q quit",
 	}
 }
 
@@ -218,7 +226,7 @@ func (m Model) exportHAR() string {
 		return "har: " + err.Error()
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "capture.har")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "har: " + err.Error()
 	}
 	return "exported HAR to " + path
@@ -231,7 +239,7 @@ func (m Model) exportViewedFlow() string {
 		return "no flow in view"
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "flow-"+m.viewFlow.ID+".txt")
-	if err := os.WriteFile(path, []byte(export.FlowText(m.viewFlow)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(export.FlowText(m.viewFlow)), 0o600); err != nil {
 		return "export: " + err.Error()
 	}
 	return "wrote " + path
@@ -249,7 +257,7 @@ func (m Model) exportFlagged() string {
 		return "no flagged flows to export"
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "flagged.txt")
-	if err := os.WriteFile(path, []byte(export.FlowsText(flagged)), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(export.FlowsText(flagged)), 0o600); err != nil {
 		return "export: " + err.Error()
 	}
 	return fmt.Sprintf("wrote %d flagged flows to %s", len(flagged), path)
@@ -266,7 +274,7 @@ func (m Model) exportCurlSelected() string {
 		return "curl: " + err.Error()
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "flow-"+f.ID+".curl")
-	if err := os.WriteFile(path, []byte(cmd+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(cmd+"\n"), 0o600); err != nil {
 		return "curl: " + err.Error()
 	}
 	return "wrote curl to " + path
@@ -330,6 +338,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fi.Blur()
 		m.status = "PAUSED: [e]dit  [f]orward  [d]rop"
 		return m, waitPause(m.feeds.Pause)
+
+	case tea.MouseMsg:
+		return m.onMouse(msg)
 
 	case repeaterResultMsg:
 		m.rep.resp = msg.flow
@@ -396,13 +407,7 @@ func (m Model) onHelpKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case k.String() == "g":
 		m.helpScroll = 0
 	}
-	if m.helpScroll > max {
-		m.helpScroll = max
-	}
-	if m.helpScroll < 0 {
-		m.helpScroll = 0
-	}
-	return m, nil
+	return m.clampHelpScroll(), nil
 }
 
 // onFilterKey handles keys while the flow-list filter is being edited. Enter
@@ -633,7 +638,7 @@ func (m *Model) doInject() string {
 
 // leaderCommand interprets the key pressed after the leader. Pressing the leader
 // twice sends a literal leader byte to the target (tmux behavior), so the child
-// app can still receive Ctrl+A.
+// app can still receive the leader chord itself.
 func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.pendingLeader = false
 
@@ -669,10 +674,28 @@ func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.adjustSplit(-splitStep)
 	case ActSplitGrow:
 		m.adjustSplit(splitStep)
+	case ActMouseCapture:
+		return m.toggleMouseCapture()
 	case ActHelpToggle:
 		m.showHelp, m.helpScroll = !m.showHelp, 0
 	}
 	return m, nil
+}
+
+// toggleMouseCapture flips whether cli-capture asks bubbletea to report mouse
+// events. Capturing steals the terminal emulator's own text selection and
+// copy-paste, so this is the re-entrant escape hatch: toggle off to select
+// text natively, then toggle back on — no restart needed either way, since
+// EnableMouseCellMotion/DisableMouse just re-issue the DECSET/DECRST
+// sequences bubbletea already knows how to send.
+func (m Model) toggleMouseCapture() (tea.Model, tea.Cmd) {
+	m.mouseCapture = !m.mouseCapture
+	if m.mouseCapture {
+		m.status = fmt.Sprintf("mouse capture ON — %s m to turn it off for native text selection", m.km().LeaderName)
+		return m, tea.EnableMouseCellMotion
+	}
+	m.status = fmt.Sprintf("mouse capture OFF (native selection works) — %s m to turn it back on", m.km().LeaderName)
+	return m, tea.DisableMouse
 }
 
 // onEditKey handles keys while the raw editor is open. Ctrl+S forwards the
@@ -747,19 +770,41 @@ func (m *Model) sizeEditor() {
 	m.ta.SetHeight(m.height - 6)
 }
 
-// leftPaneWidth is the outer width of the left pane — the value handed to
-// lipgloss .Width(); the rounded border adds one column on each side. It is a
-// fraction of the terminal width set by splitRatio, and equals the old
-// hardcoded m.width/2 - 1 when the ratio is 0.5.
-func (m Model) leftPaneWidth() int {
-	return int(float64(m.width)*m.splitRatio) - 1
+// paneBoxWidths returns the on-screen widths of the two pane boxes, border
+// included, split by splitRatio and summing to EXACTLY m.width. lipgloss draws
+// a border column on both sides of both panes — four columns in all — so the
+// two boxes, not their content, are what must fit m.width. Charging only two
+// border columns (the old leftPaneWidth + rightPaneWidth == m.width-2) made the
+// joined row m.width+2 wide, wrapping every pane line and sliding the layout —
+// and every mouse row — down the screen. mouse hit-testing (paneRects) reads
+// the same split, so clicks land on the row actually drawn.
+func (m Model) paneBoxWidths() (left, right int) {
+	left = int(float64(m.width) * m.splitRatio)
+	// Keep a border plus at least one content column in each pane at any
+	// ratio/width, so neither box collapses into its own borders.
+	if left < 3 {
+		left = 3
+	}
+	if left > m.width-3 {
+		left = m.width - 3
+	}
+	return left, m.width - left
 }
 
-// rightPaneWidth is the outer width of the right pane: whatever is left after the
-// left pane and both borders. leftPaneWidth + rightPaneWidth is always m.width-2,
-// so the two panes fit side by side exactly as the even 50/50 split did.
+// leftPaneWidth is the content width handed to lipgloss .Width() for the left
+// pane; the border adds one column on each side, so the box is leftPaneWidth+2.
+// At a 0.5 ratio on an even width this is m.width/2 - 2.
+func (m Model) leftPaneWidth() int {
+	l, _ := m.paneBoxWidths()
+	return l - 2
+}
+
+// rightPaneWidth is the content width for the right pane. leftPaneWidth and
+// rightPaneWidth each map to a box of width value+2, and the two boxes sum to
+// exactly m.width, so the joined row never overflows the terminal.
 func (m Model) rightPaneWidth() int {
-	return m.width - 2 - m.leftPaneWidth()
+	_, r := m.paneBoxWidths()
+	return r - 2
 }
 
 // leftSize is the terminal grid size for the left pane's content area. The PTY,
@@ -861,23 +906,17 @@ func (m Model) renderTraffic(w, h int) string {
 	b.WriteString(titleStyle.Render(header) + "\n")
 
 	// Reserve lines for the header, the optional filter line, and the paused
-	// prompt, so the scrollable list gets the remaining rows.
-	reserved := 1
-	if m.filtering || m.fi.Value() != "" {
+	// prompt, so the scrollable list gets the remaining rows. trafficRowLayout
+	// is the same accounting clickedFlowIndex uses to map a mouse click back
+	// onto a row, so the two can't drift apart.
+	filterLineShown := m.filtering || m.fi.Value() != ""
+	if filterLineShown {
 		b.WriteString(truncate(m.fi.View(), w) + "\n")
-		reserved++
 	}
 	if m.cmdline {
 		b.WriteString(truncate(m.ci.View(), w) + "\n")
-		reserved++
 	}
-	if m.paused != nil {
-		reserved += 2
-	}
-	listRows := h - reserved
-	if listRows < 1 {
-		listRows = 1
-	}
+	_, listRows := trafficRowLayout(h, filterLineShown, m.cmdline, m.paused != nil)
 
 	// Slide the window so the selection stays visible (the missing scroll).
 	sel := clampIndex(m.selected, len(vis))

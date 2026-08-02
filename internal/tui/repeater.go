@@ -237,7 +237,7 @@ func renderRepeaterResponse(f *capture.Flow, width int) string {
 	if f == nil || f.Response == nil {
 		return dimStyle.Render("(no response yet — Ctrl+S to send)")
 	}
-	body := codeStyle(f).Render(f.Response.Summary) + "\n\n" + renderMessage(f.Response, width)
+	body := codeStyle(f).Render(f.Response.Summary) + "\n\n" + renderMessage(f.Response, width, true)
 	return ansi.Hardwrap(body, width, false)
 }
 

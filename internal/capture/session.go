@@ -14,9 +14,11 @@ func Save(w io.Writer, flows []*Flow) error {
 	return enc.Encode(flows)
 }
 
-// SaveFile writes a capture session to path.
+// SaveFile writes a capture session to path. The session holds request and
+// response bodies verbatim, credentials included, so it is owner-only — 0600
+// rather than the 0644 os.Create would give it.
 func SaveFile(path string, flows []*Flow) error {
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
