@@ -19,6 +19,47 @@ traffic streams into the list on the right.
 Press **`?`** at any time for the keybinding overlay, and **`Ctrl+A q`** to
 quit. The leader is `Ctrl+A` — see [keybindings](keybindings.md).
 
+## Capture a whole shell session
+
+Give it no command at all and the target is your own `$SHELL`, running
+interactively in the left pane:
+
+```bash
+cli-capture
+```
+
+Every command you run inside that shell inherits the proxy environment, so the
+traffic pane fills up as you work — no need to know up front which command you
+wanted to watch. Exit the shell (`exit` or `Ctrl+D`) to quit cli-capture.
+
+## Targets your shell knows but `PATH` doesn't
+
+A named target is launched directly, which means it must be a real executable on
+`PATH`. Aliases and shell functions are not — they exist only inside your shell,
+so cli-capture reports:
+
+```text
+start target: "claude-as" not found in $PATH — if it is a shell alias or
+function, re-run with -shell (or launch a bare shell: cli-capture)
+```
+
+`-shell` runs the target through `$SHELL -ic` instead, which loads your rc file
+first:
+
+```bash
+cli-capture -shell -- claude-as alt
+```
+
+Two things worth knowing:
+
+- Arguments are quoted so they stay literal, but the **command name is left
+  unquoted on purpose**. In zsh, quoting any part of a word suppresses alias
+  expansion — a quoted name would still find a *function*, but your *aliases*
+  would silently stop resolving.
+- `$SHELL -ic` is an interactive shell, so some setups print an extra prompt
+  line into the pane before the target's own output. Harmless, and only with
+  `-shell`.
+
 ## What happens when you launch
 
 1. A CA is loaded from (or created in) `~/.cli-capture/` on first run.
