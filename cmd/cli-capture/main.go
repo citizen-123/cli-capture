@@ -52,6 +52,7 @@ func main() {
 		confDir = flag.String("dir", defaultDir(), "data directory: CA, sessions, exports, log")
 
 		themeName = flag.String("theme", "", "color theme: "+strings.Join(theme.Names(), " | ")+" (default "+theme.Default+")")
+		leaderKey = flag.String("leader", "", "prefix key for cli-capture's own commands: ctrl+a … ctrl+z (default "+tui.DefaultLeader+"). Move it if your target app needs the default")
 	)
 
 	// -config may be repeated and/or comma-separated; every file merges in the
@@ -119,6 +120,9 @@ func main() {
 	}
 	tui.ApplyTheme(palette)
 
+	if *leaderKey != "" {
+		cfg.Keys.Leader = *leaderKey // the flag wins over the file
+	}
 	keys, err := tui.NewKeyMap(cfg.Keys.Leader, cfg.Keys.Bindings)
 	if err != nil {
 		fatal("%v", err)
