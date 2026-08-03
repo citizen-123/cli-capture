@@ -4,9 +4,12 @@
 //
 //	cli-capture -- curl https://example.com
 //	cli-capture -scope api.github.com -- gh pr list
+//	cli-capture                            # bare: capture a whole $SHELL session
+//	cli-capture -shell -- claude-as alt    # target is a shell alias or function
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -69,6 +72,8 @@ func main() {
 		transparentApply = flag.Bool("transparent-apply", false, "actually install/remove the nftables redirect (needs root); otherwise the rules are only logged")
 
 		loadPath = flag.String("load", "", "preload a saved capture session (JSON) into the flow list")
+
+		useShell = flag.Bool("shell", false, "run the target through $SHELL -ic so aliases and shell functions resolve")
 	)
 	flag.Parse()
 
@@ -78,9 +83,17 @@ func main() {
 	}
 
 	argv := flag.Args()
+	// Whether the user named a target decides which remedy an unresolvable argv
+	// gets later: a named target may be an alias, a derived one means $SHELL is
+	// broken.
+	namedTarget := len(argv) > 0
 	if len(argv) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: cli-capture [flags] -- <command> [args...]")
-		os.Exit(2)
+		if *useShell {
+			fatal("-shell needs a command: cli-capture -shell -- <command> [args...]")
+		}
+		argv = runner.LoginShell() // bare launch: an interactive shell as the target
+	} else if *useShell {
+		argv = runner.ShellCommand(argv)
 	}
 
 	// User configuration: theme and keymap. Loaded before anything renders, and
@@ -207,9 +220,22 @@ func main() {
 	}
 
 	// Launch the target under a PTY with its env rewritten to route through us.
+	// Log the resolved argv: with a bare launch or -shell it is derived rather
+	// than typed, so the log is the only record of what actually ran.
+	log.Printf("target: %s", strings.Join(argv, " "))
 	env := runner.ProxyEnv(os.Environ(), px.Addr(), caFile)
 	target, err := runner.Start(argv, env)
 	if err != nil {
+		// A name that doesn't resolve is usually an alias or shell function, so
+		// point at the flag that handles those rather than leaving the user with
+		// a bare lookup failure. A derived target can only have come from
+		// $SHELL, where that advice would be nonsense.
+		if errors.Is(err, runner.ErrTargetNotFound) {
+			if namedTarget {
+				fatal("start target: %v — if it is a shell alias or function, re-run with -shell (or launch a bare shell: cli-capture)", err)
+			}
+			fatal("start target: %v — $SHELL does not name an executable; fix it, or pass a target: cli-capture -- <command>", err)
+		}
 		fatal("start target: %v", err)
 	}
 	defer target.Close()

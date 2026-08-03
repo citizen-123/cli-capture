@@ -136,11 +136,17 @@ go test ./...            # or: go test -race ./...
 ## Quick start
 
 ```bash
-./cli-capture -- curl https://example.com
+./cli-capture -- curl https://example.com   # capture one command
+./cli-capture                               # capture a whole $SHELL session
+./cli-capture -shell -- claude-as alt       # target is a shell alias or function
 ```
 
-Everything after `--` is the target command and its arguments. On first run it
-creates `~/.cli-capture/` (CA + config); subsequent runs reuse it.
+Everything after `--` is the target command and its arguments. With no command
+at all, cli-capture launches your `$SHELL` interactively — every command you run
+inside it is captured. `-shell` runs a named target through `$SHELL -ic`, so
+aliases, shell functions, and rc-file `PATH` entries resolve (`exec` alone sees
+only `PATH` binaries). On first run it creates `~/.cli-capture/` (CA + config);
+subsequent runs reuse it.
 
 Press **`?`** at any time for the full keyboard reference.
 
@@ -167,12 +173,15 @@ caught this way — use **transparent mode** for those.
 
 ```
 cli-capture [flags] -- <command> [args...]
+cli-capture [flags]                          # target defaults to $SHELL
 ```
 
-Everything after `--` is the target program to launch and monitor.
+Everything after `--` is the target program to launch and monitor. Omit it
+entirely and the target is an interactive `$SHELL`.
 
 | Flag | Default | Description |
 |---|---|---|
+| `-shell` | off | Run the target through `$SHELL -ic` so aliases and shell functions resolve. |
 | `-listen <addr>` | `127.0.0.1:0` | Proxy listen address. `:0` picks a free port. |
 | `-dir <path>` | `~/.cli-capture` | Data directory: CA, sessions, exports, log. |
 | `-config <files>` | `~/.config/cli-capture/config.json` | Config file(s) or preset name(s); repeatable and comma-separated, merged in order. See [docs/configuration.md](docs/configuration.md). |
