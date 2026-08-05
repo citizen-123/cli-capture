@@ -82,6 +82,23 @@ func TestWriteFuncLeavesDestinationOnWriteError(t *testing.T) {
 	if got := string(data); got != "valid old session" {
 		t.Errorf("destination changed to %q after callback error", got)
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		t.Errorf("directory entries after callback error = %v, want only %q", entries, filepath.Base(path))
+	}
+}
+
+func TestSyncParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "capture.txt")
+	if err := os.WriteFile(path, []byte("capture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncParent(path); err != nil {
+		t.Fatalf("syncParent: %v", err)
+	}
 }
 
 func TestWriteReplacesSymlinkWithoutFollowingIt(t *testing.T) {
