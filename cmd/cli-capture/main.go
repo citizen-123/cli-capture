@@ -338,9 +338,10 @@ func defaultDir() string {
 }
 
 // openStartupLog creates the data directory before the CA needs it, narrows an
-// existing directory just as ca.LoadOrCreate does, and opens a fresh owner-only
-// log. The explicit chmod also repairs a log created by an older version with a
-// permissive mode; OpenFile's mode applies only when the file is new.
+// existing directory just as ca.LoadOrCreate does, and appends so an early
+// validation failure cannot destroy prior diagnostics. The explicit chmod also
+// repairs a log created by an older version with a permissive Unix mode;
+// OpenFile's mode applies only when the file is new.
 func openStartupLog(dir string) (*os.File, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
@@ -349,7 +350,7 @@ func openStartupLog(dir string) (*os.File, error) {
 		return nil, err
 	}
 	path := filepath.Join(dir, "cli-capture.log")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -22,7 +23,6 @@ func TestStartupRedirectsDiagnosticsBeforeConfiguration(t *testing.T) {
 		os.Args = []string{
 			"cli-capture",
 			"-dir", os.Getenv("CLI_CAPTURE_STARTUP_LOG_DIR"),
-			"-theme", "not-a-real-theme",
 			"--", "true",
 		}
 		main()
@@ -30,6 +30,17 @@ func TestStartupRedirectsDiagnosticsBeforeConfiguration(t *testing.T) {
 	}
 
 	dir := filepath.Join(t.TempDir(), "new", "private")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create existing data directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"theme":{"base":"not-a-real-theme"}}`), 0o600); err != nil {
+		t.Fatalf("seed invalid legacy config: %v", err)
+	}
+	const priorLog = "previous diagnostics\n"
+	logPath := filepath.Join(dir, "cli-capture.log")
+	if err := os.WriteFile(logPath, []byte(priorLog), 0o644); err != nil {
+		t.Fatalf("seed existing startup log: %v", err)
+	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestStartupRedirectsDiagnosticsBeforeConfiguration$")
 	cmd.Env = append(os.Environ(), helperEnv+"=1", "CLI_CAPTURE_STARTUP_LOG_DIR="+dir)
 	var stdout, stderr bytes.Buffer
@@ -48,15 +59,19 @@ func TestStartupRedirectsDiagnosticsBeforeConfiguration(t *testing.T) {
 		t.Fatalf("startup wrote to stdout before the TUI: %q", got)
 	}
 
-	logPath := filepath.Join(dir, "cli-capture.log")
 	contents, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read startup log: %v", err)
 	}
-	if got := string(contents); !strings.Contains(got, "config:") {
+	if got := string(contents); !strings.Contains(got, priorLog) {
+		t.Fatalf("early validation failure discarded prior diagnostics: %q", got)
+	} else if !strings.Contains(got, "config:") {
 		t.Fatalf("startup log does not contain config diagnostic: %q", got)
 	}
 
+	if runtime.GOOS == "windows" {
+		return // Windows os.Chmod controls read-only state, not Unix mode bits.
+	}
 	dirInfo, err := os.Stat(dir)
 	if err != nil {
 		t.Fatalf("stat data directory: %v", err)
