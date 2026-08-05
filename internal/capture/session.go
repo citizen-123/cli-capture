@@ -17,15 +17,12 @@ func Save(w io.Writer, flows []*Flow) error {
 }
 
 // SaveFile writes a capture session to path. The session holds request and
-// response bodies verbatim, credentials included, so it is owner-only — 0600
-// rather than the 0644 os.Create would give it.
+// response bodies verbatim, credentials included, so on POSIX it is
+// owner-only (0600) and atomically replaces any previous session.
 func SaveFile(path string, flows []*Flow) error {
-	f, err := ownerfile.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return Save(f, flows)
+	return ownerfile.WriteFunc(path, func(w io.Writer) error {
+		return Save(w, flows)
+	})
 }
 
 // Load reads a capture session previously written by Save.

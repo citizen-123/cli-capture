@@ -1,53 +1,63 @@
-// Package ownerfile writes capture data to owner-only files.
+// Package ownerfile atomically writes capture data to owner-only files.
+//
+// Owner-only permissions are a POSIX guarantee. Windows does not implement
+// POSIX mode bits; callers that need an equivalent guarantee there must use
+// Windows ACLs.
 package ownerfile
 
 import (
 	"io"
 	"os"
+	"path/filepath"
 )
 
-// Mode is owner read/write with no access for group or other users.
+// Mode is owner read/write with no access for group or other users on POSIX.
 const Mode os.FileMode = 0o600
 
-// Create opens path for a private rewrite. It opens without O_TRUNC so a
-// pre-existing permissive file is narrowed through the opened descriptor
-// before any new captured data is exposed or its old contents are destroyed.
-// The caller owns the returned file.
-func Create(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, Mode)
+// WriteFunc writes a complete file to a private temporary inode and atomically
+// renames it over path after write returns successfully. A callback error
+// leaves the destination unchanged.
+func WriteFunc(path string, write func(io.Writer) error) (err error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
 	if err != nil {
-		return nil, err
+		return err
 	}
-	fail := func(err error) (*os.File, error) {
-		_ = f.Close()
-		return nil, err
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmp.Chmod(Mode); err != nil {
+		return err
 	}
-	if err := f.Chmod(Mode); err != nil {
-		return fail(err)
+	if err := write(tmp); err != nil {
+		return err
 	}
-	if err := f.Truncate(0); err != nil {
-		return fail(err)
+	if err := tmp.Sync(); err != nil {
+		return err
 	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return fail(err)
+	if err := tmp.Close(); err != nil {
+		return err
 	}
-	return f, nil
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
-// Write is os.WriteFile with an enforced owner-only mode for both new and
-// pre-existing files.
+// Write atomically writes data to path with owner-only permissions on POSIX.
 func Write(path string, data []byte) error {
-	f, err := Create(path)
-	if err != nil {
+	return WriteFunc(path, func(w io.Writer) error {
+		n, err := w.Write(data)
+		if err == nil && n != len(data) {
+			return io.ErrShortWrite
+		}
 		return err
-	}
-	n, err := f.Write(data)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	if err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
+	})
 }
