@@ -26,12 +26,29 @@ type VT struct {
 	// new cells, and Resize could race the render loop's own cols/rows read.
 	mu         sync.Mutex
 	term       *vt.Emulator
+	replyInput io.Closer
 	cols, rows int
+	closed     bool
+	closeErr   error
 
-	// done is closed once pumpReplies returns, so Close can block until the
-	// goroutine NewVT started is actually gone rather than leaking it.
-	done chan struct{}
+	// replies separates the emulator's sole pipe reader from the target PTY
+	// writer. It is deliberately bounded: see pumpReplies for the overflow
+	// policy.
+	replies chan []byte
+
+	// stop wakes forwardReplies when Close begins. The lifecycle fields above
+	// make closing it safe when ownership cleanup calls Close more than once.
+	stop chan struct{}
+
+	// drainDone and writerDone let Close wait for both owned goroutines without
+	// spawning another waiter that could itself leak behind a blocked writer.
+	drainDone  chan struct{}
+	writerDone chan struct{}
 }
+
+// replyFIFOSize retains a normal burst of terminal replies while bounding the
+// memory a child that has stopped reading its PTY can consume.
+const replyFIFOSize = 64
 
 // NewVT creates an emulator of the given size. resp, if non-nil, receives the
 // terminal's replies to queries (cursor-position reports, device attributes)
@@ -52,24 +69,62 @@ func NewVT(cols, rows int, resp io.Writer) *VT {
 	if rows < 1 {
 		rows = 24
 	}
-	v := &VT{term: vt.NewEmulator(cols, rows), cols: cols, rows: rows, done: make(chan struct{})}
-	go v.pumpReplies(resp)
+	term := vt.NewEmulator(cols, rows)
+	replyInput, ok := term.InputPipe().(io.Closer)
+	if !ok {
+		panic("terminal: x/vt input pipe is not closable")
+	}
+	v := &VT{
+		term:       term,
+		replyInput: replyInput,
+		cols:       cols,
+		rows:       rows,
+		stop:       make(chan struct{}),
+		drainDone:  make(chan struct{}),
+		writerDone: make(chan struct{}),
+	}
+	if resp != nil {
+		v.replies = make(chan []byte, replyFIFOSize)
+		go v.forwardReplies(resp)
+	} else {
+		// There is no forwarding goroutine in the discard case, so mark its
+		// lifecycle complete at construction.
+		close(v.writerDone)
+	}
+	go v.pumpReplies()
 	return v
 }
 
-// pumpReplies drains the emulator's outgoing byte stream into resp (when
-// resp is non-nil) until the emulator is closed. Read blocks on an empty pipe
-// rather than returning zero bytes, which is exactly what lets this
-// goroutine sit idle between replies instead of busy-looping.
-func (v *VT) pumpReplies(resp io.Writer) {
-	defer close(v.done)
+// pumpReplies is the sole reader of the emulator's outgoing byte stream. Read
+// blocks on an empty pipe rather than returning zero bytes, which is exactly
+// what lets this goroutine sit idle between replies instead of busy-looping.
+//
+// x/vt backs that stream with an unbuffered io.Pipe. Query handlers and
+// SendMouse synchronously write the other end, so this loop must never wait for
+// the child to drain its PTY: doing so makes the next query or mouse producer
+// wait for this reader while that producer holds VT.mu, freezing Bubble Tea's
+// only update/render loop.
+//
+// Each read is copied into a fixed FIFO for forwardReplies. When all 64 slots
+// are occupied, the newest whole read chunk is dropped; retained chunks are
+// never displaced or reordered. Dropping a reply for a child that is already
+// not reading is preferable to letting that child indefinitely block the UI.
+// When resp is nil, replies are discarded directly without starting a second
+// goroutine.
+func (v *VT) pumpReplies() {
+	defer close(v.drainDone)
 	buf := make([]byte, 4096)
 	for {
 		n, err := v.term.Read(buf)
-		if n > 0 && resp != nil {
-			if _, werr := resp.Write(buf[:n]); werr != nil {
-				log.Printf("Encountered %v while forwarding terminal reply to target PTY. Bytes: %d", werr, n)
-				return
+		if n > 0 && v.replies != nil {
+			reply := append([]byte(nil), buf[:n]...)
+			select {
+			case v.replies <- reply:
+			default:
+				// Drop silently. Logging here would synchronously call another
+				// arbitrary io.Writer from the sole emulator-pipe reader, recreating
+				// the deadlock this non-blocking hand-off exists to prevent. A mouse
+				// event storm would also turn saturation into log amplification.
 			}
 		}
 		if err != nil {
@@ -81,35 +136,93 @@ func (v *VT) pumpReplies(resp io.Writer) {
 	}
 }
 
-// closeGrace bounds how long Close waits for the reply pump to exit. The wait
-// is normally instant — term.Close unblocks a pump parked in Read immediately —
-// so this only ever elapses in the case it exists for, where the pump cannot
-// be woken at all.
+// forwardReplies is the only goroutine that writes to resp, preserving the
+// order pumpReplies observed whenever the target is healthy. A write error ends
+// forwarding but cannot end pumpReplies, so later emulator writes still have
+// their required pipe reader. Likewise, a blocked write parks only this one
+// goroutine: it holds neither VT.mu nor the emulator pipe reader.
+func (v *VT) forwardReplies(resp io.Writer) {
+	defer close(v.writerDone)
+	for {
+		// Prefer cancellation over taking queued work when Close has already
+		// begun. The second check covers stop closing at the same time the
+		// receive below becomes ready.
+		select {
+		case <-v.stop:
+			return
+		default:
+		}
+		select {
+		case reply := <-v.replies:
+			select {
+			case <-v.stop:
+				return
+			default:
+			}
+			n, err := resp.Write(reply)
+			if err == nil && n != len(reply) {
+				err = io.ErrShortWrite
+			}
+			if err != nil {
+				log.Printf("Encountered %v while forwarding terminal reply to target PTY. Bytes: %d", err, len(reply))
+				return
+			}
+		case <-v.stop:
+			return
+		}
+	}
+}
+
+// closeGrace bounds how long Close waits for the reply goroutines to exit. The
+// wait is normally instant — closing the emulator's reply input unblocks
+// pumpReplies and stop unblocks forwardReplies — so this only elapses when an
+// arbitrary resp.Writer is already blocked inside Write and provides no
+// cancellation mechanism.
 const closeGrace = 250 * time.Millisecond
 
-// Close stops the emulator — unblocking a pending Read with io.EOF — and waits
-// for the reply pump to exit, so callers don't leak the goroutine NewVT
-// started.
+// Close stops the emulator, signals the reply writer, and waits for both owned
+// goroutines to exit. Repeated calls are safe.
 //
-// The wait is bounded because term.Close can only reach a pump parked in Read.
-// pumpReplies has a second parking spot: resp.Write, into the target's PTY,
-// which is where it sits whenever a stalled child has stopped draining its own
-// pty. Nothing Close does from here wakes a goroutine blocked there, so an
-// unbounded wait turned "the child wedged" into "quitting the TUI wedges too" —
-// the operator's one remaining escape hatch, gone.
+// The wait is bounded because no operation on VT can wake an arbitrary
+// io.Writer already blocked in resp.Write. That one goroutine owns no locks and
+// no unbounded queue, but waiting for it forever would turn a wedged child into
+// a wedged quit — taking away the operator's final escape hatch.
 //
-// Bounding the wait treats the symptom. The cause-level fix would be a write
-// deadline on the pty, but darwin rejects SetWriteDeadline on a pty master
-// outright ("file type does not support deadline"), so there is nothing to set.
-// Past the grace period the pump is abandoned: it is blocked writing to a
-// descriptor the process is about to drop, and shutting down beats reclaiming
-// it. The emulator's error is returned either way — whether the pump got out is
-// not the caller's business.
+// A write deadline would cancel the actual PTY write, but darwin rejects
+// SetWriteDeadline on a PTY master ("file type does not support deadline").
+// The stop channel therefore cancels every writer state under our control; past
+// the grace period, only the single in-progress external Write can remain.
+//
+// Unlike a goroutine-per-write timeout, this design can never accumulate an
+// unbounded number of abandoned goroutines or reorder writes.
 func (v *VT) Close() error {
-	err := v.term.Close()
-	select {
-	case <-v.done:
-	case <-time.After(closeGrace):
+	v.mu.Lock()
+	if !v.closed {
+		v.closed = true
+		close(v.stop)
+		// x/vt's Close cannot be used here until charmbracelet/x#879/#881 is
+		// fixed: it races its plain closed bool against pumpReplies' concurrent
+		// Read. InputPipe is the same io.PipeWriter Close closes, so closing it
+		// directly provides the real shutdown signal without touching that
+		// unsynchronized flag.
+		v.closeErr = v.replyInput.Close()
+	}
+	err := v.closeErr
+	v.mu.Unlock()
+
+	timer := time.NewTimer(closeGrace)
+	defer timer.Stop()
+
+	drainDone, writerDone := v.drainDone, v.writerDone
+	for drainDone != nil || writerDone != nil {
+		select {
+		case <-drainDone:
+			drainDone = nil
+		case <-writerDone:
+			writerDone = nil
+		case <-timer.C:
+			return err
+		}
 	}
 	return err
 }
@@ -117,6 +230,9 @@ func (v *VT) Close() error {
 func (v *VT) Write(p []byte) (int, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closed {
+		return 0, io.ErrClosedPipe
+	}
 	return v.term.Write(p)
 }
 
@@ -124,6 +240,9 @@ func (v *VT) Write(p []byte) (int, error) {
 func (v *VT) Resize(cols, rows int) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closed {
+		return
+	}
 	v.resizeLocked(cols, rows)
 }
 
@@ -146,6 +265,9 @@ func (v *VT) resizeLocked(cols, rows int) {
 func (v *VT) Render(width, height int) string {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closed {
+		return ""
+	}
 	v.resizeLocked(width, height)
 
 	cols, rows := v.cols, v.rows
@@ -240,6 +362,9 @@ func (v *VT) ForwardMouse(ev MouseEvent) {
 
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closed {
+		return
+	}
 	switch {
 	case isWheelButton(ev.Button):
 		v.term.SendMouse(uv.MouseWheelEvent(m))
