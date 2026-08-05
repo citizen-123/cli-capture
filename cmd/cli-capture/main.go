@@ -83,6 +83,17 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Establish the private diagnostics destination before configuration emits
+	// anything. fatal writes directly to stderr, so failures opening this file
+	// and later startup validation errors remain visible to the operator.
+	logPath := filepath.Join(*confDir, "cli-capture.log")
+	logf, err := openStartupLog(*confDir)
+	if err != nil {
+		fatal("open log %s: %v", logPath, err)
+	}
+	log.SetOutput(logf)
+	defer logf.Close()
+
 	// User configuration: theme and keymap. Loaded before anything renders, and
 	// fatal on error — a config that half-applied would be worse than a refusal.
 	cfg, err := config.Load(configs, *confDir)
@@ -116,16 +127,6 @@ func main() {
 	if err != nil {
 		fatal("ca: %v", err)
 	}
-
-	// Log to a file, not the screen — the TUI owns stdout. This has to come
-	// after ca.LoadOrCreate: that is what creates confDir, so opening the log
-	// any earlier fails on a first run and every log line lands on the TUI.
-	logf, err := os.Create(filepath.Join(*confDir, "cli-capture.log"))
-	if err != nil {
-		fatal("open log %s: %v", filepath.Join(*confDir, "cli-capture.log"), err)
-	}
-	log.SetOutput(logf)
-	defer logf.Close()
 	caFile := filepath.Join(*confDir, "ca.pem")
 
 	store := capture.NewStore()
@@ -334,6 +335,29 @@ func defaultDir() string {
 		return ".cli-capture"
 	}
 	return filepath.Join(home, ".cli-capture")
+}
+
+// openStartupLog creates the data directory before the CA needs it, narrows an
+// existing directory just as ca.LoadOrCreate does, and opens a fresh owner-only
+// log. The explicit chmod also repairs a log created by an older version with a
+// permissive mode; OpenFile's mode applies only when the file is new.
+func openStartupLog(dir string) (*os.File, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "cli-capture.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 func fatal(format string, a ...any) {
