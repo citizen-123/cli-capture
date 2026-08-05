@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+
+	"github.com/citizen-123/cli-capture/internal/ownerfile"
 )
 
 // Save writes flows to w as indented JSON — a capture session that can be
@@ -18,7 +20,7 @@ func Save(w io.Writer, flows []*Flow) error {
 // response bodies verbatim, credentials included, so it is owner-only — 0600
 // rather than the 0644 os.Create would give it.
 func SaveFile(path string, flows []*Flow) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := ownerfile.Create(path)
 	if err != nil {
 		return err
 	}
