@@ -364,6 +364,64 @@ func TestVimKeysPassThroughTerminalPane(t *testing.T) {
 	}
 }
 
+// Pressing the leader twice sends its literal byte to the target (tmux
+// behavior). For the default ctrl+a leader that byte is 1, unremarkable. For
+// ctrl+space the leader's KeyType is NUL — byte 0 — which is easy to confuse
+// with "nothing written" if a future change guards the write with a truthy
+// check on the byte instead of on m.focus/m.target. Pin the actual bytes on
+// the wire for both leaders.
+func TestDoubleLeaderPressWritesTheLiteralLeaderByte(t *testing.T) {
+	cases := []struct {
+		name   string
+		leader string
+		want   byte
+	}{
+		{"default ctrl+a", "ctrl+a", 1},
+		{"ctrl+space sends NUL", "ctrl+space", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			km, err := NewKeyMap(tc.leader, nil)
+			if err != nil {
+				t.Fatalf("NewKeyMap(%q): %v", tc.leader, err)
+			}
+
+			readEnd, writeEnd, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer readEnd.Close()
+
+			m := modelWithFlows(1).WithKeys(km)
+			m.focus = focusTerminal
+			m.target = &runner.Target{Pty: writeEnd}
+
+			leaderKey := tea.KeyMsg{Type: km.Leader}
+			next, _ := m.onKey(leaderKey) // first press arms pendingLeader
+			m = next.(Model)
+			if !m.pendingLeader {
+				t.Fatal("first leader press did not arm pendingLeader")
+			}
+			next, _ = m.onKey(leaderKey) // second press sends the literal byte
+			m = next.(Model)
+			if m.pendingLeader {
+				t.Error("pendingLeader still set after the double-press completed")
+			}
+
+			if err := writeEnd.Close(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := io.ReadAll(readEnd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0] != tc.want {
+				t.Errorf("terminal received %v, want single byte %#x", got, tc.want)
+			}
+		})
+	}
+}
+
 // ':filter' and '/' must resolve an out-of-range selection identically, or the
 // documented equivalence between a command and its key is a lie.
 func TestFilterCommandMatchesTheFilterKey(t *testing.T) {

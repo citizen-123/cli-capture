@@ -73,6 +73,57 @@ func TestOverridesRebindAndUnbind(t *testing.T) {
 	}
 }
 
+func TestCtrlSpaceIsAcceptedAsTheLeader(t *testing.T) {
+	// Terminals send NUL for Ctrl+Space, which bubbletea names "ctrl+@". Both
+	// spellings must resolve to that KeyType, and LeaderName must keep whichever
+	// one the user wrote so help output reads back the key they pressed.
+	cases := []struct{ leader, wantName string }{
+		{"ctrl+space", "ctrl+space"},
+		{"ctrl+@", "ctrl+@"},
+	}
+	for _, c := range cases {
+		t.Run(c.leader, func(t *testing.T) {
+			km, err := NewKeyMap(c.leader, nil)
+			if err != nil {
+				t.Fatalf("NewKeyMap(%q): %v", c.leader, err)
+			}
+			if km.Leader != tea.KeyNull {
+				t.Errorf("leader = %v, want %v (NUL)", km.Leader, tea.KeyNull)
+			}
+			if km.LeaderName != c.wantName {
+				t.Errorf("leader name = %q, want %q", km.LeaderName, c.wantName)
+			}
+			// A NUL leader is the zero KeyType, so the keymap must still be
+			// distinguishable from the zero value that falls back to defaults.
+			if got := km.Action(ctxTraffic, "j"); got != ActFlowNext {
+				t.Errorf("Action(traffic, j) = %q, want %q", got, ActFlowNext)
+			}
+			out := (Model{}).WithKeys(km).helpView()
+			if !strings.Contains(out, c.wantName) {
+				t.Errorf("help should name the configured leader %q", c.wantName)
+			}
+		})
+	}
+}
+
+// The accepted-key list in the rejection message is hand-written, so it can
+// drift from leaderTypes(). Every spelling outside the "ctrl+a … ctrl+z" range
+// the message states as a range must be named in it individually.
+func TestLeaderErrorNamesEveryAcceptedSpelling(t *testing.T) {
+	_, err := NewKeyMap("definitely-not-a-key", nil)
+	if err == nil {
+		t.Fatal("NewKeyMap with a junk leader should fail")
+	}
+	for name := range leaderTypes() {
+		if len(name) == len("ctrl+a") && name[5] >= 'a' && name[5] <= 'z' {
+			continue // covered by the range the message already states
+		}
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("rejection message should name the accepted leader %q: %s", name, err)
+		}
+	}
+}
+
 func TestNewKeyMapRejectsBadConfig(t *testing.T) {
 	cases := []struct {
 		name      string
