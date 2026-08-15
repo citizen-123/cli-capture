@@ -204,17 +204,20 @@ type KeyMap struct {
 
 // leaderTypes maps the key names usable as a leader to their KeyType. Only
 // control keys qualify: the leader has to be a key the target app is unlikely
-// to need, and its literal byte (KeyType 1-26 is the ASCII control code) is
+// to need, and its literal byte (KeyType 0-26 is the ASCII control code) is
 // what we send when it's pressed twice.
 func leaderTypes() map[string]tea.KeyType {
 	out := map[string]tea.KeyType{}
-	for i := 1; i <= 26; i++ {
+	for i := 0; i <= 26; i++ {
 		kt := tea.KeyType(i)
 		name := tea.Key{Type: kt}.String()
 		if strings.HasPrefix(name, "ctrl+") {
 			out[name] = kt
 		}
 	}
+	// Terminals send NUL for Ctrl+Space; bubbletea names that key "ctrl+@".
+	// Accept the name people reach for as an alias for the same KeyType.
+	out["ctrl+space"] = tea.KeyNull
 	return out
 }
 
@@ -236,7 +239,7 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 	}
 	kt, ok := leaderTypes()[leader]
 	if !ok {
-		return KeyMap{}, fmt.Errorf("keys: leader %q must be a ctrl key (ctrl+a … ctrl+z, excluding ctrl+i and ctrl+m)", leader)
+		return KeyMap{}, fmt.Errorf("keys: leader %q must be a ctrl key (ctrl+space, ctrl+@, or ctrl+a … ctrl+z excluding ctrl+i and ctrl+m)", leader)
 	}
 
 	km := KeyMap{Leader: kt, LeaderName: leader, binds: map[string]map[string]Action{}}

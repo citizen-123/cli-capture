@@ -173,6 +173,7 @@ Everything after `--` is the target program to launch and monitor.
 
 | Flag | Default | Description |
 |---|---|---|
+| `-version` | off | Print the version and exit. |
 | `-listen <addr>` | `127.0.0.1:0` | Proxy listen address. `:0` picks a free port. |
 | `-dir <path>` | `~/.cli-capture` | Data directory: CA, sessions, exports, log. |
 | `-config <files>` | `~/.config/cli-capture/config.json` | Config file(s) or preset name(s); repeatable and comma-separated, merged in order. See [docs/configuration.md](docs/configuration.md). |
@@ -183,7 +184,6 @@ Everything after `--` is the target program to launch and monitor.
 | `-mitm <specs>` | *(all)* | MITM (decrypt) only these TLS hosts. |
 | `-no-mitm <specs>` | — | Pass these TLS hosts through **without** decrypting (blind tunnel, still logged). |
 | `-load <file>` | — | Preload a saved capture session (JSON) into the flow list. |
-| `-leader <key>` | `ctrl+a` | Prefix key for cli-capture's own commands. `ctrl+a` … `ctrl+z`, or `ctrl+space`. Move it if your target app needs the default. |
 | `-transparent <addr>` | off | Also run a transparent-redirect listener at this address (Linux, needs root + nftables/iptables). |
 | `-transparent-uid <uid>` | `-1` | The uid whose traffic the redirect rule targets. |
 | `-transparent-apply` | off | Actually install/remove the redirect rules (needs root); otherwise they're just logged for you to run. |
@@ -228,9 +228,10 @@ and every binding below are configurable — see
 [docs/configuration.md](docs/configuration.md).
 
 If your target app wants `Ctrl+A` — readline's beginning-of-line, or tmux itself
-— move the leader instead of fighting it. Set `keys.leader` in your config to any
-`ctrl+a` … `ctrl+z`; the help overlay follows whatever you pick, and the rebound
-key is released back to the target.
+— move the leader instead of fighting it. There is no flag for this: set
+`keys.leader` in your config to `ctrl+space` or any `ctrl+a` … `ctrl+z`. The help
+overlay follows whatever you pick, and the rebound key is released back to the
+target.
 
 **Global — leader then:**
 

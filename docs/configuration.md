@@ -141,7 +141,8 @@ draws (an empty string removes the glyph entirely):
 
 ## Keybindings
 
-`"leader"` sets the prefix key. It must be a ctrl key — `ctrl+a` through
+`"leader"` sets the prefix key. It must be a ctrl key — `ctrl+space` (spelled
+`ctrl+@` if you prefer bubbletea's own name for it), or `ctrl+a` through
 `ctrl+z`, excluding `ctrl+i` and `ctrl+m` (terminals send those as Tab and
 Enter). The default `ctrl+a` collides with tmux's own leader and with
 readline's start-of-line, so `ctrl+b` or `ctrl+g` are worth considering:
@@ -149,6 +150,11 @@ readline's start-of-line, so `ctrl+b` or `ctrl+g` are worth considering:
 ```json
 {"keys": {"leader": "ctrl+g"}}
 ```
+
+`ctrl+space` reaches the app as NUL (`0x00`), which not every terminal sends —
+macOS binds it to Input Sources switching by default, and some emulators drop it.
+If pressing it does nothing, that is the emulator, not the config; pick another
+ctrl key.
 
 `"bindings"` maps **context → key → action**. Contexts are `leader`,
 `traffic`, `detail`, `editor`, and `repeater` — the same key can do different

@@ -644,8 +644,9 @@ func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if k.Type == m.km().Leader {
 		if m.focus == focusTerminal && m.target != nil {
-			// KeyType 1-26 is the ASCII control code, so this is the literal
-			// leader byte whichever ctrl key is configured.
+			// KeyType 0-26 is the ASCII control code, so this is the literal
+			// leader byte whichever ctrl key is configured — including the
+			// NUL that ctrl+space sends.
 			m.target.Pty.Write([]byte{byte(m.km().Leader)})
 		}
 		return m, nil
