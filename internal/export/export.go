@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
+	"github.com/citizen-123/cli-capture/internal/shellquote"
 )
 
 func exportable(f *capture.Flow) bool {
@@ -48,24 +49,19 @@ func Curl(f *capture.Flow) (string, error) {
 		return "", fmt.Errorf("export: %s flows can't be exported as curl", f.Protocol)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "curl -X %s %s", method(f), shellQuote(flowURL(f)))
+	fmt.Fprintf(&b, "curl -X %s %s", method(f), shellquote.Single(flowURL(f)))
 	for _, k := range sortedKeys(f.Request.Headers) {
 		if strings.EqualFold(k, "Host") {
 			continue
 		}
 		for _, v := range f.Request.Headers[k] {
-			fmt.Fprintf(&b, " \\\n  -H %s", shellQuote(k+": "+v))
+			fmt.Fprintf(&b, " \\\n  -H %s", shellquote.Single(k+": "+v))
 		}
 	}
 	if len(f.Request.Body) > 0 {
-		fmt.Fprintf(&b, " \\\n  --data-binary %s", shellQuote(string(f.Request.Body)))
+		fmt.Fprintf(&b, " \\\n  --data-binary %s", shellquote.Single(string(f.Request.Body)))
 	}
 	return b.String(), nil
-}
-
-// shellQuote single-quotes a string for POSIX shells, escaping embedded quotes.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func sortedKeys(h map[string][]string) []string {

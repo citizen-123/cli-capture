@@ -73,6 +73,22 @@ func TestOverridesRebindAndUnbind(t *testing.T) {
 	}
 }
 
+// Ctrl+Space is the leader people reach for when a target app claims the ctrl
+// letters. Terminals send NUL for it, which bubbletea names "ctrl+@", so the
+// name a user types has to resolve to that key type.
+func TestNewKeyMapAcceptsCtrlSpace(t *testing.T) {
+	km, err := NewKeyMap("ctrl+space", nil)
+	if err != nil {
+		t.Fatalf("NewKeyMap(\"ctrl+space\", nil) = %v, want no error", err)
+	}
+	if km.Leader != tea.KeyCtrlAt {
+		t.Errorf("leader key type = %v, want %v (NUL)", km.Leader, tea.KeyCtrlAt)
+	}
+	if km.LeaderName != "ctrl+space" {
+		t.Errorf("leader name = %q, want %q — the name is what the help overlay shows", km.LeaderName, "ctrl+space")
+	}
+}
+
 func TestNewKeyMapRejectsBadConfig(t *testing.T) {
 	cases := []struct {
 		name      string

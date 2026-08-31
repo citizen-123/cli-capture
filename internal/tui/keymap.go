@@ -215,6 +215,10 @@ func leaderTypes() map[string]tea.KeyType {
 			out[name] = kt
 		}
 	}
+	// Ctrl+Space sends NUL, the same byte as Ctrl+@, so bubbletea reports it as
+	// "ctrl+@". Accept the name people actually type — it's a common leader
+	// precisely because no target app claims it.
+	out["ctrl+space"] = tea.KeyCtrlAt
 	return out
 }
 
@@ -236,7 +240,7 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 	}
 	kt, ok := leaderTypes()[leader]
 	if !ok {
-		return KeyMap{}, fmt.Errorf("keys: leader %q must be a ctrl key (ctrl+a … ctrl+z, excluding ctrl+i and ctrl+m)", leader)
+		return KeyMap{}, fmt.Errorf("keys: leader %q must be a ctrl key (ctrl+a … ctrl+z, excluding ctrl+i and ctrl+m, or ctrl+space)", leader)
 	}
 
 	km := KeyMap{Leader: kt, LeaderName: leader, binds: map[string]map[string]Action{}}
