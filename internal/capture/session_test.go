@@ -2,8 +2,49 @@ package capture
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// TestSaveFileNarrowsPreexistingSession covers upgrade/reuse behavior: the
+// mode passed to OpenFile applies only when it creates the file, so an existing
+// session from a permissive version must be narrowed explicitly before new
+// captured credentials are written.
+func TestSaveFileNarrowsPreexistingSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("owner-only POSIX modes are not expressible on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "session.json")
+	if err := os.WriteFile(path, []byte("[]\n"), 0o644); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod seed session: %v", err)
+	}
+
+	f := NewFlow("client:1", "api.example.com:443")
+	f.Request = &Message{Body: []byte("Authorization: Bearer hunter2")}
+	if err := SaveFile(path, []*Flow{f}); err != nil {
+		t.Fatalf("SaveFile: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat session: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("pre-existing session mode = %04o, want 0600", got)
+	}
+	got, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("rewritten session contains %d flows, want 1", len(got))
+	}
+}
 
 func TestSessionRoundTrip(t *testing.T) {
 	f := NewFlow("client:1", "api.example.com:443")

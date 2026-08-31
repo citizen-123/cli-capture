@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -380,6 +381,52 @@ func TestModalStatesSwallowClicksBehindThem(t *testing.T) {
 	}
 }
 
+func TestDetailModalKeepsFocusAndSwallowsLeftPaneClick(t *testing.T) {
+	screen := &fakeEmulator{}
+	m := modalModel(screen)
+	m.focus = focusTraffic
+	m.viewing = true
+	left, _ := m.paneRects()
+	ev := tea.MouseMsg{X: left.X + 2, Y: left.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+
+	newModel, _ := m.Update(ev)
+	got := newModel.(Model)
+	if got.focus != focusTraffic {
+		t.Errorf("left click while detail is open changed focus to %v, want traffic", got.focus)
+	}
+	if len(screen.forwarded) != 0 {
+		t.Errorf("left click while detail is open reached the child: %+v", screen.forwarded)
+	}
+
+	newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if newModel.(Model).viewing {
+		t.Error("detail did not retain keyboard ownership after the left click")
+	}
+}
+
+func TestEditorModalKeepsFocusAndSwallowsLeftPaneClick(t *testing.T) {
+	screen := &fakeEmulator{}
+	m := editingModel("request")
+	m.screen = screen
+	m.focus = focusTraffic
+	left, _ := m.paneRects()
+	ev := tea.MouseMsg{X: left.X + 2, Y: left.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+
+	newModel, _ := m.Update(ev)
+	got := newModel.(Model)
+	if got.focus != focusTraffic {
+		t.Errorf("left click while editor is open changed focus to %v, want traffic", got.focus)
+	}
+	if len(screen.forwarded) != 0 {
+		t.Errorf("left click while editor is open reached the child: %+v", screen.forwarded)
+	}
+
+	newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	if value := newModel.(Model).ta.Value(); value != "requestX" {
+		t.Errorf("editor did not retain keyboard ownership after the left click: value = %q", value)
+	}
+}
+
 // TestHelpOverlayWheelScrolls is the routing half of the help gate: the overlay
 // swallows clicks, but the body runs well past a screen, so the wheel has to
 // scroll it the way j/k do in onHelpKey — including the same clamp at the top.
@@ -423,43 +470,172 @@ func TestHelpOverlayWheelClampsAtBottom(t *testing.T) {
 	}
 }
 
-// TestEditorWheelScrollsEditorNotTrafficList is finding 2: the click path
-// guarded on m.editing but the wheel path guarded only on m.viewing, so a notch
-// over the open editor moved the flow selection hidden underneath it. The wheel
-// now walks the editor instead.
-func TestEditorWheelScrollsEditorNotTrafficList(t *testing.T) {
+// repeaterWheelTextarea builds a five-row editor whose cursor is on line 10
+// while its viewport is already following that cursor. A native wheel-down
+// message can therefore move the visible window without moving the insertion
+// point; starting at a boundary would let a broken cursor-moving translation
+// pass silently by clamping.
+func repeaterWheelTextarea(prefix string) textarea.Model {
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("%s %02d", prefix, i)
+	}
+	ta := newEditor()
+	ta.SetWidth(40)
+	ta.SetHeight(5)
+	ta.SetValue(strings.Join(lines, "\n"))
+	ta.Focus()
+	for ta.Line() > 0 {
+		ta.CursorUp()
+	}
+	for i := 0; i < 10; i++ {
+		ta, _ = ta.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	ta.CursorEnd()
+	return ta
+}
+
+// TestRepeaterWheelScrollsFocusedTextareaWithoutMovingCaret guards both
+// editable Repeater sections. The wheel must reach the focused textarea's
+// native viewport handling: rendered content changes, but a subsequent typed
+// character still lands at the original line and column.
+func TestRepeaterWheelScrollsFocusedTextareaWithoutMovingCaret(t *testing.T) {
+	tests := []struct {
+		name       string
+		focus      int
+		focused    func(Model) textarea.Model
+		wantInsert string
+	}{
+		{
+			name:       "request",
+			focus:      repFocusReq,
+			focused:    func(m Model) textarea.Model { return m.rep.req },
+			wantInsert: "request 10X\nrequest 11",
+		},
+		{
+			name:       "payload",
+			focus:      repFocusPayload,
+			focused:    func(m Model) textarea.Model { return m.rep.payload },
+			wantInsert: "payload 10X\npayload 11",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := repeaterWheelTextarea("request")
+			payload := repeaterWheelTextarea("payload")
+			if tc.focus == repFocusReq {
+				payload.Blur()
+			} else {
+				req.Blur()
+			}
+			m := Model{
+				width: 100, height: 40, repeating: true,
+				rep: repeaterState{req: req, payload: payload, respVP: viewport.New(40, 5), focus: tc.focus},
+			}
+
+			before := tc.focused(m)
+			beforeView := before.View()
+			beforeLine := before.Line()
+			beforeCol := before.LineInfo().CharOffset
+			ev := tea.MouseMsg{X: 10, Y: 10, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
+
+			newModel, _ := m.Update(ev)
+			got := newModel.(Model)
+			after := tc.focused(got)
+			if afterView := after.View(); afterView == beforeView {
+				t.Fatal("wheel down did not change the focused textarea's visible window")
+			}
+			if after.Line() != beforeLine || after.LineInfo().CharOffset != beforeCol {
+				t.Fatalf("wheel moved caret from line/column %d/%d to %d/%d",
+					beforeLine, beforeCol, after.Line(), after.LineInfo().CharOffset)
+			}
+
+			newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+			got = newModel.(Model)
+			if value := tc.focused(got).Value(); !strings.Contains(value, tc.wantInsert) {
+				t.Fatalf("typing after wheel inserted at the wrong location:\n%s", value)
+			}
+		})
+	}
+}
+
+// TestRepeaterWheelStillScrollsResponseViewport protects the existing third
+// focus target while Request and Payload gain native textarea routing.
+func TestRepeaterWheelStillScrollsResponseViewport(t *testing.T) {
+	vp := viewport.New(40, 3)
+	vp.SetContent(strings.Join([]string{"r0", "r1", "r2", "r3", "r4", "r5", "r6"}, "\n"))
+	m := Model{width: 100, height: 40, repeating: true, rep: repeaterState{respVP: vp, focus: repFocusResp}}
+
+	ev := tea.MouseMsg{X: 10, Y: 10, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
+	newModel, _ := m.Update(ev)
+	if got := newModel.(Model).rep.respVP.YOffset; got != wheelLines {
+		t.Fatalf("response wheel offset = %d, want %d", got, wheelLines)
+	}
+}
+
+// TestEditorWheelScrollsWithoutMovingInsertionPoint is finding 2: bubbles'
+// textarea forwards mouse messages to its private viewport, which can scroll
+// around an interior caret without changing the logical insertion point.
+func TestEditorWheelScrollsWithoutMovingInsertionPoint(t *testing.T) {
 	lines := make([]string, 40)
 	for i := range lines {
 		lines[i] = fmt.Sprintf("line %02d", i)
 	}
-	m := editingModel(strings.Join(lines, "\n"))
 
-	_, right := m.paneRects()
-	ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown}
-
-	newModel, _ := m.Update(ev)
-	got := newModel.(Model)
-	if got.ta.Line() != wheelLines {
-		t.Errorf("wheel down over the open editor: cursor line = %d, want %d — the editor did not scroll",
-			got.ta.Line(), wheelLines)
+	tests := []struct {
+		name   string
+		button tea.MouseButton
+		setup  []tea.KeyType
+	}{
+		{name: "down", button: tea.MouseButtonWheelDown, setup: repeatKey(tea.KeyDown, 20)},
+		{name: "up", button: tea.MouseButtonWheelUp, setup: append(repeatKey(tea.KeyDown, 24), repeatKey(tea.KeyUp, 4)...)},
 	}
-	if got.selected != 0 {
-		t.Errorf("wheel over the open editor moved the flow selection to %d; the list is behind the editor", got.selected)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := editingModel(strings.Join(lines, "\n"))
+			for _, keyType := range tt.setup {
+				m.ta, _ = m.ta.Update(tea.KeyMsg{Type: keyType})
+			}
+			m.ta.CursorEnd()
+			beforeView := m.ta.View()
+			beforeValue := m.ta.Value()
+			beforeColumn := m.ta.LineInfo().CharOffset
+
+			_, right := m.paneRects()
+			ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tt.button}
+			newModel, _ := m.Update(ev)
+			got := newModel.(Model)
+
+			if got.ta.View() == beforeView {
+				t.Errorf("wheel %s did not scroll the editor's visible content", tt.name)
+			}
+			if got.ta.Line() != 20 || got.ta.LineInfo().CharOffset != beforeColumn {
+				t.Errorf("wheel %s moved insertion point to line %d column %d, want line 20 column %d",
+					tt.name, got.ta.Line(), got.ta.LineInfo().CharOffset, beforeColumn)
+			}
+			if got.ta.Value() != beforeValue {
+				t.Errorf("wheel %s changed editor value", tt.name)
+			}
+
+			newModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+			got = newModel.(Model)
+			if !strings.Contains(got.ta.Value(), "line 20X\nline 21") {
+				t.Errorf("typing after wheel %s inserted at the wrong location:\n%s", tt.name, got.ta.Value())
+			}
+			if got.selected != 0 {
+				t.Errorf("wheel over the open editor moved the flow selection to %d; the list is behind the editor", got.selected)
+			}
+		})
 	}
 }
 
-// TestEditorWheelUpClampsAtFirstLine checks the wheel can't walk the cursor off
-// the top of the editor.
-func TestEditorWheelUpClampsAtFirstLine(t *testing.T) {
-	m := editingModel("line 0\nline 1\nline 2")
-
-	_, right := m.paneRects()
-	ev := tea.MouseMsg{X: right.X + 2, Y: right.Y + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp}
-
-	newModel, _ := m.Update(ev)
-	if got := newModel.(Model).ta.Line(); got != 0 {
-		t.Errorf("wheel up at the first line of the editor: cursor line = %d, want 0", got)
+func repeatKey(keyType tea.KeyType, n int) []tea.KeyType {
+	keys := make([]tea.KeyType, n)
+	for i := range keys {
+		keys[i] = keyType
 	}
+	return keys
 }
 
 // TestOnMouseRightPaneWheelScrollsViewportWhenViewing checks the detail-view

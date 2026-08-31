@@ -56,9 +56,10 @@ func contentGrid(box rect) (cols, rows int) {
 //   - filtering and cmdline leave both panes drawn, but a focused text input
 //     owns the input stream — no keystroke reaches a pane while one is open, so
 //     no click should either.
-//   - editing and viewing replace only the RIGHT pane's content; the terminal
-//     pane is still drawn and still live. They stay pane-local in
-//     onRightPaneMouse rather than swallowing input meant for the left pane.
+//   - editing and viewing replace the RIGHT pane's content and own the keyboard
+//     stream. Mouse input can still reach that visible right-pane content, but
+//     the left pane stays inactive so its border cannot claim a focus that
+//     keyboard routing does not honor.
 func (m Model) onMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.width == 0 {
 		return m, nil // nothing has been sized/drawn yet
@@ -74,6 +75,9 @@ func (m Model) onMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	left, right := m.paneRects()
 	switch {
 	case left.contains(ev.X, ev.Y):
+		if m.editing || m.viewing {
+			return m, nil
+		}
 		return m.onLeftPaneMouse(ev, left)
 	case right.contains(ev.X, ev.Y):
 		return m.onRightPaneMouse(ev, right)
@@ -110,15 +114,22 @@ func (m Model) onHelpMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 // onRepeaterMouse handles mouse input while the Repeater modal is up. Like the
 // help overlay it owns the whole screen, so clicks are swallowed; the wheel
 // goes to whichever section has focus, which is the same fall-through
-// onRepeaterKey uses for keys it doesn't claim. Only the response section is a
-// viewport, so in practice only that one moves — the two textarea sections
-// ignore mouse input entirely (see wheelEditor).
+// onRepeaterKey uses for keys it doesn't claim. textarea forwards MouseMsg to
+// its private viewport and then keeps the logical cursor visible, so Request
+// and Payload scroll without changing where the next character is inserted.
 func (m Model) onRepeaterMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if !tea.MouseEvent(ev).IsWheel() || m.rep.focus != repFocusResp {
+	if !tea.MouseEvent(ev).IsWheel() {
 		return m, nil
 	}
 	var cmd tea.Cmd
-	m.rep.respVP, cmd = m.rep.respVP.Update(ev)
+	switch m.rep.focus {
+	case repFocusReq:
+		m.rep.req, cmd = m.rep.req.Update(ev)
+	case repFocusPayload:
+		m.rep.payload, cmd = m.rep.payload.Update(ev)
+	case repFocusResp:
+		m.rep.respVP, cmd = m.rep.respVP.Update(ev)
+	}
 	return m, cmd
 }
 
@@ -301,35 +312,15 @@ func (m Model) onRightPaneWheel(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// wheelEditor scrolls the raw-request editor by one notch.
+// wheelEditor scrolls the raw editor without moving its insertion point.
 //
-// It cannot just hand the event to m.ta.Update: bubbles' textarea has no mouse
-// handling at all — unlike viewport, which is why the detail view above can
-// forward the message verbatim — so doing that would compile, run, and
-// silently scroll nothing. Translating the notch into the up/down keys the
-// textarea does bind walks the cursor, and the textarea slides its own window
-// to keep the cursor visible. It is the same move wheelPageKey makes on the
-// terminal pane, where a notch becomes PgUp/PgDn.
+// bubbles' textarea forwards mouse messages to its private viewport, then
+// repositions that viewport only as needed to keep the logical cursor visible.
+// Using its native path therefore scrolls around an interior caret without
+// changing where the next character is inserted.
 func (m Model) wheelEditor(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if ev.Action != tea.MouseActionPress {
-		return m, nil
-	}
-	var key tea.KeyMsg
-	switch ev.Button {
-	case tea.MouseButtonWheelUp:
-		key = tea.KeyMsg{Type: tea.KeyUp}
-	case tea.MouseButtonWheelDown:
-		key = tea.KeyMsg{Type: tea.KeyDown}
-	default:
-		return m, nil // a horizontal notch has no line to move to
-	}
-	// Only the last command survives on purpose. Each Update that moves the
-	// cursor returns a fresh cursor-blink timer, so batching all three would
-	// leave two stray timers racing to toggle the cursor.
 	var cmd tea.Cmd
-	for i := 0; i < wheelLines; i++ {
-		m.ta, cmd = m.ta.Update(key)
-	}
+	m.ta, cmd = m.ta.Update(ev)
 	return m, cmd
 }
 

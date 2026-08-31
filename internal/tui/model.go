@@ -6,7 +6,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"github.com/citizen-123/cli-capture/internal/capture"
 	"github.com/citizen-123/cli-capture/internal/export"
 	"github.com/citizen-123/cli-capture/internal/intercept"
+	"github.com/citizen-123/cli-capture/internal/ownerfile"
 	"github.com/citizen-123/cli-capture/internal/protocol"
 	"github.com/citizen-123/cli-capture/internal/replay"
 	"github.com/citizen-123/cli-capture/internal/runner"
@@ -226,7 +226,7 @@ func (m Model) exportHAR() string {
 		return "har: " + err.Error()
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "capture.har")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := ownerfile.Write(path, data); err != nil {
 		return "har: " + err.Error()
 	}
 	return "exported HAR to " + path
@@ -239,7 +239,7 @@ func (m Model) exportViewedFlow() string {
 		return "no flow in view"
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "flow-"+m.viewFlow.ID+".txt")
-	if err := os.WriteFile(path, []byte(export.FlowText(m.viewFlow)), 0o600); err != nil {
+	if err := ownerfile.Write(path, []byte(export.FlowText(m.viewFlow))); err != nil {
 		return "export: " + err.Error()
 	}
 	return "wrote " + path
@@ -257,7 +257,7 @@ func (m Model) exportFlagged() string {
 		return "no flagged flows to export"
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "flagged.txt")
-	if err := os.WriteFile(path, []byte(export.FlowsText(flagged)), 0o600); err != nil {
+	if err := ownerfile.Write(path, []byte(export.FlowsText(flagged))); err != nil {
 		return "export: " + err.Error()
 	}
 	return fmt.Sprintf("wrote %d flagged flows to %s", len(flagged), path)
@@ -274,7 +274,7 @@ func (m Model) exportCurlSelected() string {
 		return "curl: " + err.Error()
 	}
 	path := filepath.Join(filepath.Dir(m.sessionPath), "flow-"+f.ID+".curl")
-	if err := os.WriteFile(path, []byte(cmd+"\n"), 0o600); err != nil {
+	if err := ownerfile.Write(path, []byte(cmd+"\n")); err != nil {
 		return "curl: " + err.Error()
 	}
 	return "wrote curl to " + path
