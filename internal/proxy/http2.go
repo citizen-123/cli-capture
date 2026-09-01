@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -47,8 +48,18 @@ type h2Capture struct {
 	sni    string
 }
 
+// isGRPCContentType treats malformed values as ordinary HTTP/2 content types.
+func isGRPCContentType(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return mediaType == "application/grpc" ||
+		strings.HasPrefix(mediaType, "application/grpc+") && len(mediaType) > len("application/grpc+")
+}
+
 func (c *h2Capture) RoundTrip(req *http.Request) (*http.Response, error) {
-	isGRPC := strings.HasPrefix(req.Header.Get("Content-Type"), "application/grpc")
+	isGRPC := isGRPCContentType(req.Header.Get("Content-Type"))
 
 	flow := capture.NewFlow(clientAddr(req, c.target), c.target)
 	flow.SNI = c.sni
@@ -71,14 +82,26 @@ func (c *h2Capture) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// --- request side ---
 	switch {
-	case c.proxy.tamper.ShouldInterceptRequest(flow) && isGRPC && req.Body != nil:
+	case c.proxy.tamper.ShouldInterceptRequest(flow) && isGRPC && hasH2RequestBody(req):
 		// Streaming gRPC being intercepted: tamper each message in flight, so a
 		// long-lived/bidi stream is never buffered (which would deadlock it).
 		reqMsg.Raw = h2HeaderDump(req)
-		req.Body = &bodyWrap{r: protocol.NewGRPCTamperReader(req.Body,
-			c.grpcTransform(flow, capture.ClientToServer, touch, c.proxy.tamper.BeforeForward)), c: req.Body}
+		reqMsg.Meta[protocol.BodyRepresentationMeta] = protocol.BodyRepresentationUnavailable
+		original := req.Body
+		transformed := protocol.NewGRPCTamperReader(original,
+			c.grpcTransform(flow, capture.ClientToServer, touch, c.proxy.tamper.BeforeForward))
+		var wire bytes.Buffer
+		req.ContentLength = -1
+		req.Header.Del("Content-Length")
+		onEOF, onClose := h2RequestCaptureCallbacks(reqMsg, &wire, true, touch, req.ContentLength)
+		req.Body = &bodyWrap{
+			r:       io.TeeReader(transformed, &wire),
+			c:       original,
+			onEOF:   onEOF,
+			onClose: onClose,
+		}
 
-	case c.proxy.tamper.ShouldInterceptRequest(flow) && req.Body != nil:
+	case c.proxy.tamper.ShouldInterceptRequest(flow) && hasH2RequestBody(req):
 		// Unary/non-gRPC being intercepted: buffer→pause→edit→forward the body.
 		body, _ := io.ReadAll(req.Body)
 		req.Body.Close()
@@ -93,17 +116,42 @@ func (c *h2Capture) RoundTrip(req *http.Request) (*http.Response, error) {
 		if out == nil {
 			out = body
 		}
+		finishH2RequestCapture(reqMsg, out, false)
 		setBody(req.Header, &req.ContentLength, len(out))
 		req.Body = io.NopCloser(bytes.NewReader(out))
 
 	default:
-		// Not intercepted: observe only, streaming untouched.
+		// Not intercepted: observe while retaining the bytes that reach upstream.
 		reqMsg.Raw = h2HeaderDump(req)
-		if req.Body != nil && isGRPC {
-			req.Body = &bodyWrap{r: protocol.NewGRPCFramer(req.Body, func(m protocol.GRPCMessage) {
+		switch {
+		case !hasH2RequestBody(req):
+			reqMsg.Meta[protocol.BodyRepresentationMeta] = protocol.BodyRepresentationDecoded
+		case isGRPC:
+			reqMsg.Meta[protocol.BodyRepresentationMeta] = protocol.BodyRepresentationUnavailable
+			original := req.Body
+			observed := protocol.NewGRPCFramer(original, func(m protocol.GRPCMessage) {
 				flow.AddMessage(grpcMsg(capture.ClientToServer, m))
 				touch()
-			}), c: req.Body}
+			})
+			var wire bytes.Buffer
+			onEOF, onClose := h2RequestCaptureCallbacks(reqMsg, &wire, true, touch, req.ContentLength)
+			req.Body = &bodyWrap{
+				r:       io.TeeReader(observed, &wire),
+				c:       original,
+				onEOF:   onEOF,
+				onClose: onClose,
+			}
+		default:
+			reqMsg.Meta[protocol.BodyRepresentationMeta] = protocol.BodyRepresentationUnavailable
+			original := req.Body
+			var wire bytes.Buffer
+			onEOF, onClose := h2RequestCaptureCallbacks(reqMsg, &wire, false, touch, req.ContentLength)
+			req.Body = &bodyWrap{
+				r:       io.TeeReader(original, &wire),
+				c:       original,
+				onEOF:   onEOF,
+				onClose: onClose,
+			}
 		}
 		if _, drop := c.proxy.tamper.BeforeForward(flow, reqMsg); drop {
 			flow.Status = capture.StatusComplete
@@ -151,7 +199,7 @@ func (c *h2Capture) RoundTrip(req *http.Request) (*http.Response, error) {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		readGRPCStatus(resp, respMsg) // trailers are populated once the body is fully read
-		respMsg.Body = capture.DecodeContentEncoding(body, resp.Header.Get("Content-Encoding"))
+		respMsg.Body = capture.DecodeContentEncoding(body, strings.Join(resp.Header.Values("Content-Encoding"), ","))
 		respMsg.Raw = body
 		out, drop := c.proxy.tamper.BeforeDeliver(flow, respMsg)
 		if drop {
@@ -190,14 +238,19 @@ func (c *h2Capture) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// grpcTransform builds a per-message tamper callback: it records each streamed
-// gRPC message and runs it through the given intercept hook (BeforeForward or
-// BeforeDeliver), returning the (possibly edited) bytes for re-framing.
+// grpcTransform builds a per-message tamper callback. The hook sees the
+// captured input, while the Flow records only the bytes actually forwarded (or
+// delivered); dropped messages are omitted.
 func (c *h2Capture) grpcTransform(flow *capture.Flow, dir capture.Direction, touch func(), hook func(*capture.Flow, *capture.Message) ([]byte, bool)) protocol.GRPCTransform {
 	return func(m protocol.GRPCMessage) ([]byte, bool) {
-		mm := grpcMsg(dir, m)
-		flow.AddMessage(mm)
-		out, drop := hook(flow, mm)
+		out, drop := hook(flow, grpcMsg(dir, m))
+		if !drop {
+			forwarded := m
+			if out != nil {
+				forwarded.Data = out
+			}
+			flow.AddMessage(grpcMsg(dir, forwarded))
+		}
 		touch()
 		return out, drop
 	}
@@ -212,6 +265,40 @@ func readGRPCStatus(resp *http.Response, respMsg *capture.Message) {
 	}
 }
 
+func hasH2RequestBody(req *http.Request) bool {
+	return req.Body != nil && req.Body != http.NoBody
+}
+
+func finishH2RequestCapture(message *capture.Message, wire []byte, isGRPC bool) {
+	message.Raw = append([]byte(nil), wire...)
+	if isGRPC {
+		message.Body = append([]byte(nil), wire...)
+	} else {
+		encoding := strings.Join(http.Header(message.Headers).Values("Content-Encoding"), ",")
+		logical, err := capture.DecodeContentEncodingStrict(wire, encoding)
+		if err != nil {
+			message.Body = append([]byte(nil), wire...)
+			message.Meta[protocol.BodyRepresentationMeta] = protocol.BodyRepresentationUnavailable
+			return
+		}
+		message.Body = logical
+	}
+	message.Meta[protocol.BodyRepresentationMeta] = protocol.BodyRepresentationDecoded
+}
+
+func h2RequestCaptureCallbacks(message *capture.Message, wire *bytes.Buffer, isGRPC bool, touch func(), expectedLength int64) (func(), func()) {
+	finish := func() {
+		finishH2RequestCapture(message, wire.Bytes(), isGRPC)
+		touch()
+	}
+	finishOnClose := func() {
+		if expectedLength > 0 && int64(wire.Len()) == expectedLength {
+			finish()
+		}
+	}
+	return finish, finishOnClose
+}
+
 // setBody updates the content length after an edit. HTTP/2 frames the length
 // itself, so the ContentLength field is what matters; we only touch the header
 // if the peer sent one, to avoid inventing a Content-Length on a gRPC stream.
@@ -222,14 +309,15 @@ func setBody(h http.Header, contentLength *int64, n int) {
 	}
 }
 
-// bodyWrap is a pass-through ReadCloser that fires onEOF once, the first time
-// the underlying reader reports io.EOF — used to read gRPC trailers and mark the
-// flow complete after the body has fully streamed.
+// bodyWrap is a pass-through ReadCloser that fires onEOF once when the reader
+// reaches EOF. Request capture may also supply onClose to finalize a fully
+// consumed fixed-length body whose transport does not perform a final EOF read.
 type bodyWrap struct {
-	r     io.Reader
-	c     io.Closer
-	onEOF func()
-	done  bool
+	r       io.Reader
+	c       io.Closer
+	onEOF   func()
+	onClose func()
+	done    bool
 }
 
 func (b *bodyWrap) Read(p []byte) (int, error) {
@@ -244,6 +332,10 @@ func (b *bodyWrap) Read(p []byte) (int, error) {
 }
 
 func (b *bodyWrap) Close() error {
+	if !b.done && b.onClose != nil {
+		b.done = true
+		b.onClose()
+	}
 	if b.c != nil {
 		return b.c.Close()
 	}

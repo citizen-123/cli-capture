@@ -97,7 +97,11 @@ func (c *Condition) Compile() error {
 		}
 		c.re = re
 	case Glob:
-		re, err := regexp.Compile(globToRegexp(c.Pattern))
+		pattern := c.Pattern
+		if c.Field == FieldHost {
+			pattern = canonicalDNSCase(pattern)
+		}
+		re, err := regexp.Compile(globToRegexp(pattern))
 		if err != nil {
 			return err
 		}
@@ -109,12 +113,22 @@ func (c *Condition) Compile() error {
 // Match reports whether t satisfies this condition (honoring Negate).
 func (c *Condition) Match(t Target) bool {
 	v := t.field(c.Field)
+	pattern := c.Pattern
+	// DNS names are case-insensitive. Fold only ordinary host matching here:
+	// regexes remain exactly as authored, and other fields retain byte-sensitive
+	// semantics.
+	if c.Field == FieldHost && c.Strategy != Regex {
+		v = canonicalDNSCase(v)
+		if c.Strategy == Substr || c.Strategy == Exact {
+			pattern = canonicalDNSCase(pattern)
+		}
+	}
 	var m bool
 	switch c.Strategy {
 	case Substr:
-		m = strings.Contains(v, c.Pattern)
+		m = strings.Contains(v, pattern)
 	case Exact:
-		m = v == c.Pattern
+		m = v == pattern
 	case Glob, Regex:
 		m = c.re != nil && c.re.MatchString(v)
 	}
@@ -217,4 +231,23 @@ func globToRegexp(g string) string {
 	}
 	b.WriteString("$")
 	return b.String()
+}
+
+// canonicalDNSCase applies DNS's ASCII case folding without changing Unicode
+// text. It returns s unchanged (and allocation-free) when no folding is needed.
+func canonicalDNSCase(s string) string {
+	for i := range len(s) {
+		if s[i] < 'A' || s[i] > 'Z' {
+			continue
+		}
+		b := []byte(s)
+		for offset := range b[i:] {
+			j := i + offset
+			if b[j] >= 'A' && b[j] <= 'Z' {
+				b[j] += 'a' - 'A'
+			}
+		}
+		return string(b)
+	}
+	return s
 }

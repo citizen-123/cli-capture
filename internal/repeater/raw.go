@@ -6,6 +6,9 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+
+	"github.com/citizen-123/cli-capture/internal/capture"
+	"github.com/citizen-123/cli-capture/internal/protocol"
 )
 
 // Raw renders the template as an editable raw HTTP request: request line,
@@ -28,7 +31,7 @@ func (t *Template) Raw() string {
 		}
 	}
 	b.WriteString("\r\n")
-	b.Write(t.Body)
+	b.Write(t.editableBody())
 	return b.String()
 }
 
@@ -65,8 +68,12 @@ func ParseRaw(raw string, base *Template) (*Template, error) {
 	header.Del("Host") // the target host comes from base; don't send an edited Host twice
 
 	scheme, host, secure := "http", "", false
+	var proto capture.Protocol
+	var messages []protocol.GRPCMessage
 	if base != nil {
 		secure = base.Secure
+		proto = base.Protocol
+		messages = cloneGRPCMessages(base.Messages)
 		if u, err := url.Parse(base.URL); err == nil {
 			if u.Scheme != "" {
 				scheme = u.Scheme
@@ -79,13 +86,55 @@ func ParseRaw(raw string, base *Template) (*Template, error) {
 		target = u.RequestURI()
 	}
 
+	templateBody := []byte(body)
+	if proto == capture.ProtoGRPC {
+		templateBody = nil
+		original := ""
+		if base != nil {
+			original = string(base.editableBody())
+		}
+		if body != original {
+			switch len(messages) {
+			case 0:
+				messages = []protocol.GRPCMessage{{Data: []byte(body)}}
+			case 1:
+				if messages[0].Compressed {
+					return nil, fmt.Errorf("repeater: compressed gRPC payload cannot be edited as text")
+				}
+				messages[0].Data = []byte(body)
+			default:
+				return nil, fmt.Errorf("repeater: cannot map one edited body to %d gRPC messages", len(messages))
+			}
+		}
+	}
+
 	return &Template{
-		Method: method,
-		URL:    scheme + "://" + host + target,
-		Header: header,
-		Body:   []byte(body),
-		Secure: secure,
+		Method:   method,
+		URL:      scheme + "://" + host + target,
+		Header:   header,
+		Body:     templateBody,
+		Messages: messages,
+		Protocol: proto,
+		Secure:   secure,
 	}, nil
+}
+
+func (t *Template) editableBody() []byte {
+	if t.Protocol == capture.ProtoGRPC && len(t.Messages) == 1 && !t.Messages[0].Compressed {
+		return t.Messages[0].Data
+	}
+	return t.Body
+}
+
+func cloneGRPCMessages(messages []protocol.GRPCMessage) []protocol.GRPCMessage {
+	out := make([]protocol.GRPCMessage, len(messages))
+	for i, message := range messages {
+		out[i] = protocol.GRPCMessage{
+			Compressed: message.Compressed,
+			Data:       append([]byte(nil), message.Data...),
+		}
+	}
+	return out
 }
 
 // ParsePayloads parses "name = a, b, c" lines into name → payload list. Blank

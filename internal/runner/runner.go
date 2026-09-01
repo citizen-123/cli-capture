@@ -115,6 +115,46 @@ var plainWord = regexp.MustCompile(`^[A-Za-z0-9_.:@%+=/-]+$`)
 // Start launches argv[0] with argv[1:] under a PTY, using env for its
 // environment. Read/write child I/O via the returned Target.Pty.
 func Start(argv []string, env []string) (*Target, error) {
+	return start(argv, env, nil)
+}
+
+// StartWithCredentials is Start with the target process configured to run as
+// the resolved user. Only the child receives these credentials; the calling
+// cli-capture process is unchanged.
+func StartWithCredentials(argv []string, env []string, credentials *UserCredentials) (*Target, error) {
+	if credentials == nil {
+		return nil, fmt.Errorf("runner: nil user credentials")
+	}
+	return start(argv, env, credentials)
+}
+
+func start(argv []string, env []string, credentials *UserCredentials) (*Target, error) {
+	return startWithPTY(argv, env, credentials, pty.Start)
+}
+
+func startWithPTY(
+	argv []string,
+	env []string,
+	credentials *UserCredentials,
+	startPTY func(*exec.Cmd) (*os.File, error),
+) (*Target, error) {
+	cmd, err := command(argv, env, credentials)
+	if err != nil {
+		return nil, err
+	}
+	ptmx, err := startPTY(cmd)
+	if err != nil {
+		if credentials != nil {
+			return nil, fmt.Errorf("runner: start target with uid %d gid %d: %w", credentials.uid, credentials.gid, err)
+		}
+		return nil, err
+	}
+	t := &Target{Cmd: cmd, Pty: ptmx, done: make(chan error, 1)}
+	go func() { t.done <- cmd.Wait() }()
+	return t, nil
+}
+
+func command(argv []string, env []string, credentials *UserCredentials) (*exec.Cmd, error) {
 	if len(argv) == 0 {
 		return nil, fmt.Errorf("runner: empty command")
 	}
@@ -128,13 +168,10 @@ func Start(argv []string, env []string) (*Target, error) {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = env
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		return nil, err
+	if err := configureUserCredentials(cmd, credentials); err != nil {
+		return nil, fmt.Errorf("runner: configure target credentials: %w", err)
 	}
-	t := &Target{Cmd: cmd, Pty: ptmx, done: make(chan error, 1)}
-	go func() { t.done <- cmd.Wait() }()
-	return t, nil
+	return cmd, nil
 }
 
 // Resize propagates a terminal size change to the child.

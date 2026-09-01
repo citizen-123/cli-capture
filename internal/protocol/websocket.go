@@ -3,7 +3,10 @@ package protocol
 import (
 	"bufio"
 	"crypto/rand"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httputil"
 	"strings"
 	"sync"
 	"time"
@@ -74,7 +77,14 @@ func headerHasToken(h http.Header, key, token string) bool {
 // handleWebSocket relays the upgrade handshake, then pumps frames both ways —
 // capturing every data frame and, for client→server frames, offering them to
 // the tamper hook. Called from HTTP1.Handle when the request is an upgrade.
-func handleWebSocket(f *capture.Flow, req *http.Request, client, server *bufio.ReadWriter, tamper Tamperer, touch func()) error {
+func handleWebSocket(
+	f *capture.Flow,
+	req *http.Request,
+	client, server *bufio.ReadWriter,
+	tamper Tamperer,
+	touch func(),
+	closeUpgradeConnections func(),
+) error {
 	f.Protocol = capture.ProtoWebSocket
 	touch()
 
@@ -89,18 +99,15 @@ func handleWebSocket(f *capture.Flow, req *http.Request, client, server *bufio.R
 		return err
 	}
 
-	status, err := relayHandshakeResponse(server, client)
+	statusLine, err := server.Reader.ReadString('\n')
 	if err != nil {
-		f.Status = capture.StatusError
-		f.Err = err
-		touch()
-		return err
+		return failHTTP1Response(f, err, touch)
 	}
-	if status != http.StatusSwitchingProtocols {
-		// Server declined the upgrade; there are no frames to pump.
-		f.Status = capture.StatusComplete
-		touch()
-		return nil
+	if parseStatusCode(statusLine) != http.StatusSwitchingProtocols {
+		return relayWebSocketRejection(f, req, statusLine, server, client, touch)
+	}
+	if err := relaySwitchingProtocols(statusLine, server, client); err != nil {
+		return failHTTP1Response(f, err, touch)
 	}
 
 	session := &wsSession{client: client, server: server}
@@ -110,11 +117,22 @@ func handleWebSocket(f *capture.Flow, req *http.Request, client, server *bufio.R
 		defer reg.UnregisterSession(f.ID)
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); pumpWS(session, client, f, capture.ClientToServer, tamper, touch) }()
-	go func() { defer wg.Done(); pumpWS(session, server, f, capture.ServerToClient, nil, touch) }()
-	wg.Wait()
+	done := make(chan struct{}, 2)
+	go func() {
+		pumpWS(session, client, f, capture.ClientToServer, tamper, touch)
+		done <- struct{}{}
+	}()
+	go func() {
+		pumpWS(session, server, f, capture.ServerToClient, nil, touch)
+		done <- struct{}{}
+	}()
+	<-done
+	if closeUpgradeConnections != nil {
+		// An upgraded connection ends when either peer closes. Interrupt the
+		// opposite pump so a silent peer cannot keep the Flow active forever.
+		closeUpgradeConnections()
+	}
+	<-done
 
 	if f.Status == capture.StatusActive || f.Status == capture.StatusPending {
 		f.Status = capture.StatusComplete
@@ -123,29 +141,79 @@ func handleWebSocket(f *capture.Flow, req *http.Request, client, server *bufio.R
 	return nil
 }
 
-// relayHandshakeResponse copies the upstream handshake response's status line and
+// relaySwitchingProtocols copies a successful handshake's status line and
 // headers to the client verbatim, stopping exactly at the blank line so no
-// following frame bytes are consumed into the wrong buffer. Returns the status
-// code (101 on success).
-func relayHandshakeResponse(server, client *bufio.ReadWriter) (int, error) {
-	status, first := 0, true
+// following frame bytes are consumed into the wrong buffer.
+func relaySwitchingProtocols(statusLine string, server, client *bufio.ReadWriter) error {
+	if _, err := client.Write([]byte(statusLine)); err != nil {
+		return err
+	}
 	for {
 		line, err := server.Reader.ReadString('\n')
 		if err != nil {
-			return 0, err
+			return err
 		}
 		if _, err := client.Write([]byte(line)); err != nil {
-			return 0, err
-		}
-		if first {
-			status = parseStatusCode(line)
-			first = false
+			return err
 		}
 		if strings.TrimRight(line, "\r\n") == "" {
-			break
+			return client.Flush()
 		}
 	}
-	return status, client.Flush()
+}
+
+// relayWebSocketRejection parses and drains a rejected upgrade as a normal HTTP
+// response before exposing any of it to the client. net/http owns all message
+// framing here, including fixed-length, chunked, and close-delimited bodies.
+func relayWebSocketRejection(
+	f *capture.Flow,
+	req *http.Request,
+	statusLine string,
+	server, client *bufio.ReadWriter,
+	touch func(),
+) error {
+	responseReader := bufio.NewReader(io.MultiReader(strings.NewReader(statusLine), server.Reader))
+	resp, err := http.ReadResponse(responseReader, req)
+	if err != nil {
+		return failHTTP1Response(f, err, touch)
+	}
+
+	rawResp, err := httputil.DumpResponse(resp, true)
+	if err != nil {
+		_ = resp.Body.Close()
+		return failHTTP1Response(f, err, touch)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		_ = resp.Body.Close()
+		return failHTTP1Response(f, err, touch)
+	}
+	if err := resp.Body.Close(); err != nil {
+		return failHTTP1Response(f, err, touch)
+	}
+
+	decodedBody := capture.DecodeContentEncoding(body, strings.Join(resp.Header.Values("Content-Encoding"), ","))
+	f.Response = &capture.Message{
+		Direction: capture.ServerToClient,
+		Timestamp: time.Now(),
+		Summary:   fmt.Sprintf("%s (%d bytes)", resp.Status, len(decodedBody)),
+		Headers:   resp.Header,
+		Body:      decodedBody,
+		Raw:       rawResp,
+		Meta:      map[string]string{"status": resp.Status},
+	}
+	touch()
+
+	if _, err := client.Write(rawResp); err != nil {
+		return failHTTP1Response(f, err, touch)
+	}
+	if err := client.Flush(); err != nil {
+		return failHTTP1Response(f, err, touch)
+	}
+
+	f.Status = capture.StatusComplete
+	touch()
+	return nil
 }
 
 // parseStatusCode pulls the numeric code out of "HTTP/1.1 101 Switching …".

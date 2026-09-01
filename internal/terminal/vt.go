@@ -20,16 +20,18 @@ import (
 type VT struct {
 	// mu serializes every call into term. Unlike vt10x (which this replaced),
 	// x/vt's Emulator does no locking of its own: Write runs on the PTY pump
-	// goroutine, Render runs on bubbletea's Update/View goroutine, and
-	// ForwardMouse runs there too. Without a lock spanning each full
-	// operation a Write landing mid-Render would tear a frame across old and
-	// new cells, and Resize could race the render loop's own cols/rows read.
-	mu         sync.Mutex
-	term       *vt.Emulator
-	replyInput io.Closer
-	cols, rows int
-	closed     bool
-	closeErr   error
+	// goroutine, while Render and input forwarding run on Bubble Tea's
+	// Update/View goroutine. Without a lock spanning each full operation a
+	// Write landing mid-Render would tear a frame across old and new cells,
+	// and Resize could race the render loop's own cols/rows read.
+	mu                sync.Mutex
+	term              *vt.Emulator
+	replyInput        io.Closer
+	cols, rows        int
+	applicationCursor bool
+	bracketedPaste    bool
+	closed            bool
+	closeErr          error
 
 	// replies separates the emulator's sole pipe reader from the target PTY
 	// writer. It is deliberately bounded: see pumpReplies for the overflow
@@ -51,17 +53,14 @@ type VT struct {
 const replyFIFOSize = 64
 
 // NewVT creates an emulator of the given size. resp, if non-nil, receives the
-// terminal's replies to queries (cursor-position reports, device attributes)
-// and any mouse events ForwardMouse turns into bytes — wire it to the
-// target's PTY input so query-driven TUIs don't hang and forwarded clicks
-// reach the child.
+// terminal's replies to queries and mouse input emitted by the emulator — wire
+// it to the target's PTY input so query-driven TUIs don't hang and forwarded
+// clicks reach the child.
 //
 // The pump goroutine always runs, even when resp is nil: x/vt's Read is
-// pull-based (backed by an io.Pipe), and SendMouse/query replies write into
-// that pipe synchronously — with nothing ever reading the other end, that
-// write blocks forever and wedges the emulator. Draining unconditionally
-// (and discarding when resp is nil) is what keeps "no reply target" from
-// turning into "first query hangs the whole thing."
+// pull-based (backed by an io.Pipe), and query/mouse replies write into that
+// pipe synchronously. Draining unconditionally prevents a query or mouse event
+// from wedging the emulator when no response writer is configured.
 func NewVT(cols, rows int, resp io.Writer) *VT {
 	if cols < 1 {
 		cols = 80
@@ -83,6 +82,27 @@ func NewVT(cols, rows int, resp io.Writer) *VT {
 		drainDone:  make(chan struct{}),
 		writerDone: make(chan struct{}),
 	}
+	// x/vt remains the source of truth for terminal modes. Its callbacks keep
+	// the two input-affecting modes available under VT.mu so encoding can stay
+	// synchronous with the caller's direct PTY write.
+	term.SetCallbacks(vt.Callbacks{
+		EnableMode: func(mode ansi.Mode) {
+			switch mode {
+			case ansi.ModeCursorKeys:
+				v.applicationCursor = true
+			case ansi.ModeBracketedPaste:
+				v.bracketedPaste = true
+			}
+		},
+		DisableMode: func(mode ansi.Mode) {
+			switch mode {
+			case ansi.ModeCursorKeys:
+				v.applicationCursor = false
+			case ansi.ModeBracketedPaste:
+				v.bracketedPaste = false
+			}
+		},
+	})
 	if resp != nil {
 		v.replies = make(chan []byte, replyFIFOSize)
 		go v.forwardReplies(resp)
@@ -99,11 +119,11 @@ func NewVT(cols, rows int, resp io.Writer) *VT {
 // blocks on an empty pipe rather than returning zero bytes, which is exactly
 // what lets this goroutine sit idle between replies instead of busy-looping.
 //
-// x/vt backs that stream with an unbuffered io.Pipe. Query handlers and
-// SendMouse synchronously write the other end, so this loop must never wait for
-// the child to drain its PTY: doing so makes the next query or mouse producer
-// wait for this reader while that producer holds VT.mu, freezing Bubble Tea's
-// only update/render loop.
+// x/vt backs that stream with an unbuffered io.Pipe. Query handlers and mouse
+// forwarding synchronously write the other end, so this loop must never wait
+// for the child to drain its PTY: doing so makes the next producer wait for
+// this reader while that producer holds VT.mu, freezing Bubble Tea's only
+// update/render loop.
 //
 // Each read is copied into a fixed FIFO for forwardReplies. When all 64 slots
 // are occupied, the newest whole read chunk is dropped; retained chunks are
@@ -304,6 +324,52 @@ func (v *VT) Render(width, height int) string {
 		b.WriteString(ansi.ResetStyle)
 	}
 	return b.String()
+}
+
+// CursorKeyBytes encodes an arrow from x/vt's callback-maintained DECCKM state.
+// Returning bytes keeps keyboard input on the caller's single synchronous PTY
+// write path rather than mixing it into the bounded asynchronous reply FIFO.
+func (v *VT) CursorKeyBytes(key CursorKey) []byte {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed {
+		return nil
+	}
+	var final byte
+	switch key {
+	case CursorUp:
+		final = 'A'
+	case CursorDown:
+		final = 'B'
+	case CursorRight:
+		final = 'C'
+	case CursorLeft:
+		final = 'D'
+	default:
+		return nil
+	}
+	if v.applicationCursor {
+		return []byte{0x1b, 'O', final}
+	}
+	return []byte{0x1b, '[', final}
+}
+
+// PasteBytes encodes pasted text from x/vt's callback-maintained DECSET 2004
+// state without putting user input through the droppable reply FIFO.
+func (v *VT) PasteBytes(text string) []byte {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed {
+		return nil
+	}
+	if !v.bracketedPaste {
+		return []byte(text)
+	}
+	b := make([]byte, 0, len(ansi.BracketedPasteStart)+len(text)+len(ansi.BracketedPasteEnd))
+	b = append(b, ansi.BracketedPasteStart...)
+	b = append(b, text...)
+	b = append(b, ansi.BracketedPasteEnd...)
+	return b
 }
 
 // mouseButtons maps this package's neutral MouseButton to x/vt's, so

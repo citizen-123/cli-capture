@@ -44,7 +44,18 @@ var (
 	date    = "unknown"
 )
 
+var errInterrupted = errors.New("interrupted")
+
 func main() {
+	if err := run(); err != nil {
+		if errors.Is(err, errInterrupted) {
+			os.Exit(1)
+		}
+		fatal("%v", err)
+	}
+}
+
+func run() error {
 	var (
 		showVersion = flag.Bool("version", false, "print version and exit")
 
@@ -69,7 +80,7 @@ func main() {
 		mitmExc = flag.String("no-mitm", "", "pass these TLS hosts through without decrypting (comma-separated specs)")
 
 		transparentAddr  = flag.String("transparent", "", "also run a transparent-redirect listener at this address (Linux, needs root+nftables); empty = off")
-		transparentUID   = flag.Int("transparent-uid", -1, "uid whose traffic the nftables rule redirects")
+		transparentUID   = flag.Int("transparent-uid", -1, "uid assigned to the target and redirected when -transparent-apply is used")
 		transparentApply = flag.Bool("transparent-apply", false, "actually install/remove the nftables redirect (needs root); otherwise the rules are only logged")
 
 		loadPath = flag.String("load", "", "preload a saved capture session (JSON) into the flow list")
@@ -80,7 +91,7 @@ func main() {
 
 	if *showVersion {
 		fmt.Printf("cli-capture %s (commit %s, built %s)\n", version, commit, date)
-		return
+		return nil
 	}
 
 	argv := flag.Args()
@@ -90,7 +101,7 @@ func main() {
 	namedTarget := len(argv) > 0
 	if len(argv) == 0 {
 		if *useShell {
-			fatal("-shell needs a command: cli-capture -shell -- <command> [args...]")
+			return fmt.Errorf("-shell needs a command: cli-capture -shell -- <command> [args...]")
 		}
 		argv = runner.LoginShell() // bare launch: an interactive shell as the target
 	} else if *useShell {
@@ -103,7 +114,7 @@ func main() {
 	logPath := filepath.Join(*confDir, "cli-capture.log")
 	logf, err := openStartupLog(*confDir)
 	if err != nil {
-		fatal("open log %s: %v", logPath, err)
+		return fmt.Errorf("open log %s: %v", logPath, err)
 	}
 	log.SetOutput(logf)
 	defer logf.Close()
@@ -112,7 +123,7 @@ func main() {
 	// fatal on error — a config that half-applied would be worse than a refusal.
 	cfg, err := config.Load(configs, *confDir)
 	if err != nil {
-		fatal("%v", err)
+		return fmt.Errorf("%v", err)
 	}
 	log.Printf("config: %s", cfg.Describe())
 
@@ -121,7 +132,7 @@ func main() {
 	}
 	palette, err := theme.Resolve(cfg.Theme.Base, cfg.Theme.Colors, cfg.Theme.Glyphs, cfg.Theme.Border)
 	if err != nil {
-		fatal("%v", err)
+		return fmt.Errorf("%v", err)
 	}
 	if os.Getenv("NO_COLOR") != "" {
 		palette = palette.Colorless()
@@ -136,13 +147,13 @@ func main() {
 	}
 	keys, err := tui.NewKeyMap(cfg.Keys.Leader, cfg.Keys.Bindings)
 	if err != nil {
-		fatal("%v", err)
+		return fmt.Errorf("%v", err)
 	}
 	log.Printf("keys: leader %s", keys.LeaderName)
 
 	authority, err := ca.LoadOrCreate(*confDir)
 	if err != nil {
-		fatal("ca: %v", err)
+		return fmt.Errorf("ca: %v", err)
 	}
 	caFile := filepath.Join(*confDir, "ca.pem")
 
@@ -150,7 +161,7 @@ func main() {
 	if *loadPath != "" {
 		flows, err := capture.LoadFile(*loadPath)
 		if err != nil {
-			fatal("load session: %v", err)
+			return fmt.Errorf("load session: %v", err)
 		}
 		for _, f := range flows {
 			store.Add(f)
@@ -163,7 +174,7 @@ func main() {
 	// intercept-all (excludes still apply). Excludes always win over includes.
 	interceptScope, err := buildScope(*scopeInc, *scopeExc, *lastWins)
 	if err != nil {
-		fatal("scope: %v", err)
+		return fmt.Errorf("scope: %v", err)
 	}
 	engine.SetScope(interceptScope)
 	log.Printf("intercept scope: %s", interceptScope.Describe())
@@ -175,111 +186,205 @@ func main() {
 	// listed TLS hosts through blind.
 	mitmScope, err := buildScope(*mitmInc, *mitmExc, *lastWins)
 	if err != nil {
-		fatal("mitm policy: %v", err)
+		return fmt.Errorf("mitm policy: %v", err)
 	}
 	px.SetMITMPolicy(mitmScope)
 	log.Printf("mitm policy: %s", mitmScope.Describe())
 
-	if err := px.Listen(*listen); err != nil {
-		fatal("proxy listen: %v", err)
-	}
-	go px.Serve()
-	defer px.Close()
-	log.Printf("proxy listening on %s", px.Addr())
-
-	// Optional transparent-redirect capture for targets that ignore proxy env.
-	if *transparentAddr != "" {
-		tl, err := transparent.Listen(*transparentAddr)
-		if err != nil {
-			fatal("transparent listen: %v", err)
-		}
-		defer tl.Close()
-		go tl.Serve(func(conn net.Conn, dst string) { px.HandleTransparent(conn, dst) })
-
-		if *transparentApply {
-			if *transparentUID < 0 {
-				fatal("transparent: -transparent-apply requires -transparent-uid")
+	var (
+		targetCredentials *runner.UserCredentials
+		target            *runner.Target
+		screen            terminal.Emulator
+		prog              *tea.Program
+	)
+	return executeCapture(captureLifecycle{
+		startProxy: func() error {
+			if err := px.Listen(*listen); err != nil {
+				return fmt.Errorf("proxy listen: %v", err)
 			}
+			go px.Serve()
+			log.Printf("proxy listening on %s", px.Addr())
+			return nil
+		},
+		closeProxy: func() { _ = px.Close() },
+		startTransparent: func() (transparentLifecycle, error) {
+			targetCredentials, err = transparentTargetCredentials(*transparentAddr, *transparentApply, *transparentUID)
+			if err != nil {
+				return transparentLifecycle{}, fmt.Errorf("%v", err)
+			}
+
+			if *transparentAddr == "" {
+				return transparentLifecycle{}, nil
+			}
+
+			tl, err := transparent.Listen(*transparentAddr)
+			if err != nil {
+				return transparentLifecycle{}, fmt.Errorf("transparent listen: %v", err)
+			}
+			lifecycle := transparentLifecycle{
+				closeListener: func() { _ = tl.Close() },
+			}
+			go tl.Serve(func(conn net.Conn, dst string) { px.HandleTransparent(conn, dst) })
+
+			if !*transparentApply {
+				logTransparentSetup(tl, *transparentUID)
+				return lifecycle, nil
+			}
+
 			_, portStr, _ := net.SplitHostPort(tl.Addr())
 			port, _ := strconv.Atoi(portStr)
 			teardown, backend, err := transparent.ApplyRedirect(port, *transparentUID)
 			if err != nil {
-				fatal("transparent apply: %v", err)
+				return lifecycle, fmt.Errorf("transparent apply: %v", err)
 			}
-			defer teardown()
+			lifecycle.teardown = func() { _ = teardown() }
 			log.Printf("transparent: applied via %s", backend)
-			// Flush the rules on SIGINT/SIGTERM too — a leftover NAT redirect is
-			// the worst failure mode. (A hard SIGKILL can't be caught; the next
-			// -transparent-apply run flushes any stale table first.)
-			sigCh := make(chan os.Signal, 1)
-			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-			go func() {
-				<-sigCh
-				_ = teardown()
-				os.Exit(1)
-			}()
+
+			// Route termination through run's return boundary so every resource
+			// unwinds in LIFO order before main preserves the signal exit status.
+			ch := make(chan os.Signal, 1)
+			signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+			lifecycle.signals = ch
+			lifecycle.stopSignals = func() { signal.Stop(ch) }
 			log.Printf("transparent: nftables redirect applied (uid %d → %s)", *transparentUID, tl.Addr())
-		} else {
-			logTransparentSetup(tl, *transparentUID)
-		}
-	}
-
-	// Launch the target under a PTY with its env rewritten to route through us.
-	// Log the resolved argv: with a bare launch or -shell it is derived rather
-	// than typed, so the log is the only record of what actually ran.
-	log.Printf("target: %s", strings.Join(argv, " "))
-	env := runner.ProxyEnv(os.Environ(), px.Addr(), caFile)
-	target, err := runner.Start(argv, env)
-	if err != nil {
-		// A name that doesn't resolve is usually an alias or shell function, so
-		// point at the flag that handles those rather than leaving the user with
-		// a bare lookup failure. A derived target can only have come from
-		// $SHELL, where that advice would be nonsense.
-		if errors.Is(err, runner.ErrTargetNotFound) {
-			if namedTarget {
-				fatal("start target: %v — if it is a shell alias or function, re-run with -shell (or launch a bare shell: cli-capture)", err)
+			return lifecycle, nil
+		},
+		startTarget: func() error {
+			// Log the resolved argv: with a bare launch or -shell it is derived
+			// rather than typed, so the log records what actually ran.
+			log.Printf("target: %s", strings.Join(argv, " "))
+			env := runner.ProxyEnv(os.Environ(), px.Addr(), caFile)
+			target, err = startTarget(argv, env, targetCredentials, runner.Start, runner.StartWithCredentials)
+			if err == nil {
+				return nil
 			}
-			fatal("start target: %v — $SHELL does not name an executable; fix it, or pass a target: cli-capture -- <command>", err)
-		}
-		fatal("start target: %v", err)
-	}
-	defer target.Close()
+			if errors.Is(err, runner.ErrTargetNotFound) {
+				if namedTarget {
+					return fmt.Errorf("start target: %v — if it is a shell alias or function, re-run with -shell (or launch a bare shell: cli-capture)", err)
+				}
+				return fmt.Errorf("start target: %v — $SHELL does not name an executable; fix it, or pass a target: cli-capture -- <command>", err)
+			}
+			return fmt.Errorf("start target: %v", err)
+		},
+		closeTarget: func() { _ = target.Close() },
+		startTerminal: func() {
+			// Closing the emulator stops its reply pump before target.Close
+			// releases the PTY; executeCapture registers them in that order.
+			screen = terminal.NewVT(80, 24, target.Pty)
+			ptyCh := make(chan struct{}, 1)
+			pauseCh := make(chan tui.Paused, 16)
+			engine.OnPause(func(token intercept.PauseToken, f *capture.Flow, msg *capture.Message) {
+				pauseCh <- tui.Paused{Token: token, Flow: f, Msg: msg}
+			})
+			go pumpPTY(target, screen, ptyCh)
 
-	// Feeds bridging the plumbing to the UI's Elm loop. A full VT emulator so
-	// full-screen TUI targets render correctly; its query replies (and
-	// forwarded mouse events) go back to the target's PTY input. Closing it
-	// stops its reply-pump goroutine; do that before target.Close() (which
-	// runs first, since defers are LIFO) so nothing writes to the PTY after
-	// it's gone.
-	screen := terminal.NewVT(80, 24, target.Pty)
-	defer func() {
-		if err := screen.Close(); err != nil {
-			log.Printf("Encountered %v while closing the terminal emulator.", err)
-		}
-	}()
-	ptyCh := make(chan struct{}, 1)
-	pauseCh := make(chan tui.Paused, 16)
-
-	engine.OnPause(func(f *capture.Flow, msg *capture.Message) {
-		pauseCh <- tui.Paused{Flow: f, Msg: msg}
+			feeds := tui.Feeds{Events: store.Subscribe(), Pty: ptyCh, Pause: pauseCh}
+			model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json")).WithKeys(keys)
+			prog = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+			go func() {
+				_ = target.Wait()
+				prog.Quit()
+			}()
+		},
+		closeTerminal: func() {
+			if err := screen.Close(); err != nil {
+				log.Printf("Encountered %v while closing the terminal emulator.", err)
+			}
+		},
+		runProgram: func(sigCh <-chan os.Signal) error {
+			return runProgram(
+				func() error {
+					_, err := prog.Run()
+					return err
+				},
+				prog.Quit,
+				sigCh,
+			)
+		},
 	})
+}
 
-	go pumpPTY(target, screen, ptyCh)
+type captureLifecycle struct {
+	startProxy       func() error
+	closeProxy       func()
+	startTransparent func() (transparentLifecycle, error)
+	startTarget      func() error
+	closeTarget      func()
+	startTerminal    func()
+	closeTerminal    func()
+	runProgram       func(<-chan os.Signal) error
+}
 
-	feeds := tui.Feeds{Events: store.Subscribe(), Pty: ptyCh, Pause: pauseCh}
-	model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json")).WithKeys(keys)
-	// WithMouseCellMotion enables mouse reporting; the model's mouseCapture
-	// toggle (leader m) flips it at runtime for native text selection.
-	prog := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+type transparentLifecycle struct {
+	closeListener func()
+	teardown      func()
+	signals       <-chan os.Signal
+	stopSignals   func()
+}
 
-	// Quit the UI when the child exits.
+func executeCapture(lifecycle captureLifecycle) error {
+	if err := lifecycle.startProxy(); err != nil {
+		return err
+	}
+	defer lifecycle.closeProxy()
+
+	transparentState, err := lifecycle.startTransparent()
+	if transparentState.closeListener != nil {
+		defer transparentState.closeListener()
+	}
+	if transparentState.teardown != nil {
+		defer transparentState.teardown()
+	}
+	if transparentState.stopSignals != nil {
+		defer transparentState.stopSignals()
+	}
+	if err != nil {
+		return err
+	}
+
+	if err := lifecycle.startTarget(); err != nil {
+		return err
+	}
+	defer lifecycle.closeTarget()
+
+	lifecycle.startTerminal()
+	defer lifecycle.closeTerminal()
+
+	return lifecycle.runProgram(transparentState.signals)
+}
+
+func runProgram(run func() error, quit func(), sigCh <-chan os.Signal) error {
+	if sigCh == nil {
+		if err := run(); err != nil {
+			return fmt.Errorf("tui: %w", err)
+		}
+		return nil
+	}
+
+	interrupted := make(chan struct{}, 1)
+	done := make(chan struct{})
+	handlerDone := make(chan struct{})
 	go func() {
-		_ = target.Wait()
-		prog.Quit()
+		defer close(handlerDone)
+		select {
+		case <-sigCh:
+			quit()
+			interrupted <- struct{}{}
+		case <-done:
+		}
 	}()
 
-	if _, err := prog.Run(); err != nil {
-		fatal("tui: %v", err)
+	runErr := run()
+	close(done)
+	<-handlerDone
+	if runErr != nil {
+		return fmt.Errorf("tui: %w", runErr)
+	}
+	select {
+	case <-interrupted:
+		return errInterrupted
+	default:
+		return nil
 	}
 }
 
@@ -331,6 +436,51 @@ func splitComma(s string) []string {
 		}
 	}
 	return out
+}
+
+// transparentTargetCredentials selects a child identity only for automatic
+// transparent-rule application. Manual rules and ordinary proxy mode leave the
+// target's credentials untouched.
+func transparentTargetCredentials(addr string, apply bool, uid int) (*runner.UserCredentials, error) {
+	return transparentTargetCredentialsWithLookup(addr, apply, uid, runner.LookupUserCredentials)
+}
+
+func transparentTargetCredentialsWithLookup(
+	addr string,
+	apply bool,
+	uid int,
+	lookup func(int) (*runner.UserCredentials, error),
+) (*runner.UserCredentials, error) {
+	if addr == "" || !apply {
+		return nil, nil
+	}
+	if uid < 0 {
+		return nil, fmt.Errorf("transparent: -transparent-apply requires -transparent-uid")
+	}
+	if uid == 0 {
+		return nil, fmt.Errorf("transparent: -transparent-uid must name a non-root user so proxy traffic is not redirected")
+	}
+	credentials, err := lookup(uid)
+	if err != nil {
+		return nil, fmt.Errorf("transparent: resolve -transparent-uid %d: %w", uid, err)
+	}
+	return credentials, nil
+}
+
+type targetStarter func([]string, []string) (*runner.Target, error)
+type credentialTargetStarter func([]string, []string, *runner.UserCredentials) (*runner.Target, error)
+
+func startTarget(
+	argv []string,
+	env []string,
+	credentials *runner.UserCredentials,
+	start targetStarter,
+	startWithCredentials credentialTargetStarter,
+) (*runner.Target, error) {
+	if credentials != nil {
+		return startWithCredentials(argv, env, credentials)
+	}
+	return start(argv, env)
 }
 
 // logTransparentSetup records the nftables commands the user must run (as root)

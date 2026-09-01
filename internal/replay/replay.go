@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
+	"github.com/citizen-123/cli-capture/internal/protocol"
 )
 
 // client goes straight to the origin server (not back through the proxy), so it
@@ -30,6 +32,15 @@ func Resend(f *capture.Flow) (*capture.Flow, error) {
 		return nil, fmt.Errorf("replay: %s flows are not resendable", f.Protocol)
 	}
 
+	logicalBody, err := protocol.CapturedRequestBody(f)
+	if err != nil {
+		return nil, fmt.Errorf("replay: reconstruct request body: %w", err)
+	}
+	wireBody, err := protocol.EncodeRequestBody(f.Protocol, http.Header(f.Request.Headers), logicalBody)
+	if err != nil {
+		return nil, fmt.Errorf("replay: reconstruct request body: %w", err)
+	}
+
 	scheme := "http"
 	if f.Secure {
 		scheme = "https"
@@ -40,14 +51,14 @@ func Resend(f *capture.Flow) (*capture.Flow, error) {
 	}
 	url := scheme + "://" + f.ServerAddr + f.Request.Meta["path"]
 
-	req, err := http.NewRequest(method, url, bytes.NewReader(f.Request.Body))
+	req, err := http.NewRequest(method, url, bytes.NewReader(wireBody))
 	if err != nil {
 		return nil, err
 	}
 	// Copy headers, but let the client own Host/Content-Length so a stale value
 	// from the capture can't desync the resend.
 	for k, vv := range f.Request.Headers {
-		if k == "Host" || k == "Content-Length" {
+		if strings.EqualFold(k, "Host") || strings.EqualFold(k, "Content-Length") {
 			continue
 		}
 		for _, v := range vv {
@@ -59,7 +70,8 @@ func Resend(f *capture.Flow) (*capture.Flow, error) {
 	nf.Protocol = f.Protocol
 	nf.SNI = f.SNI
 	nf.Secure = f.Secure
-	nf.Request = f.Request
+	nf.Request = replayedRequest(req, logicalBody)
+	nf.Messages = replayedGRPCMessages(logicalBody)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -67,8 +79,14 @@ func Resend(f *capture.Flow) (*capture.Flow, error) {
 		nf.Err = err
 		return nf, err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		err = fmt.Errorf("replay: read response body: %w", readErr)
+		nf.Status = capture.StatusError
+		nf.Err = err
+		return nf, err
+	}
 	nf.Response = &capture.Message{
 		Direction: capture.ServerToClient,
 		Timestamp: time.Now(),
@@ -80,4 +98,39 @@ func Resend(f *capture.Flow) (*capture.Flow, error) {
 	}
 	nf.Status = capture.StatusComplete
 	return nf, nil
+}
+
+func replayedRequest(req *http.Request, body protocol.RequestBody) *capture.Message {
+	message := &capture.Message{
+		Direction: capture.ClientToServer,
+		Timestamp: time.Now(),
+		Summary:   fmt.Sprintf("%s %s (replay)", req.Method, req.URL.RequestURI()),
+		Headers:   req.Header.Clone(),
+		Body:      append([]byte(nil), body.Body...),
+		Meta: map[string]string{
+			"method":                        req.Method,
+			"path":                          req.URL.RequestURI(),
+			protocol.BodyRepresentationMeta: protocol.BodyRepresentationDecoded,
+		},
+	}
+	return message
+}
+
+func replayedGRPCMessages(body protocol.RequestBody) []*capture.Message {
+	messages := make([]*capture.Message, 0, len(body.Messages))
+	for _, grpcMessage := range body.Messages {
+		meta := map[string]string{}
+		if grpcMessage.Compressed {
+			meta["compressed"] = "true"
+		}
+		payload := append([]byte(nil), grpcMessage.Data...)
+		messages = append(messages, &capture.Message{
+			Direction: capture.ClientToServer,
+			Timestamp: time.Now(),
+			Body:      payload,
+			Raw:       append([]byte(nil), payload...),
+			Meta:      meta,
+		})
+	}
+	return messages
 }

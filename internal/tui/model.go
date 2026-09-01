@@ -33,18 +33,20 @@ const (
 	focusTraffic
 )
 
-// Paused is the notification that a flow is held awaiting a decision, carrying
-// the exact outgoing message being tampered (Msg.Raw seeds the editor).
+// Paused is the notification that one message is held awaiting a decision. Its
+// token resolves this exact pause even when the flow has another paused message;
+// Msg.Raw seeds the editor.
 type Paused struct {
-	Flow *capture.Flow
-	Msg  *capture.Message
+	Token intercept.PauseToken
+	Flow  *capture.Flow
+	Msg   *capture.Message
 }
 
 // Channels the model watches. main wires these to the proxy/PTY plumbing.
 type Feeds struct {
 	Events <-chan capture.Event // store change events
 	Pty    <-chan struct{}      // "PTY produced output, re-render"
-	Pause  <-chan Paused        // a flow just became paused
+	Pause  <-chan Paused        // a message just became paused
 }
 
 type Model struct {
@@ -58,10 +60,12 @@ type Model struct {
 	focus         focus
 	flows         []*capture.Flow
 	selected      int
-	paused        *capture.Flow    // flow awaiting a forward/drop decision
-	pausedMsg     *capture.Message // the specific outgoing message being tampered
-	editing       bool             // true while the raw editor is open
-	pendingLeader bool             // true after the leader key, awaiting a command
+	paused        *capture.Flow        // flow awaiting a forward/drop decision
+	pausedMsg     *capture.Message     // the specific outgoing message being tampered
+	pausedToken   intercept.PauseToken // identity of the active pause occurrence
+	pauseQueue    []Paused             // paused messages waiting behind the active one, in arrival order
+	editing       bool                 // true while the raw editor is open
+	pendingLeader bool                 // true after the leader key, awaiting a command
 	ta            textarea.Model
 	viewing       bool           // true while the detail view is open
 	viewFlow      *capture.Flow  // the flow shown in the detail view
@@ -212,10 +216,12 @@ func (m Model) resendSelected() string {
 		return "nothing selected to resend"
 	}
 	nf, err := replay.Resend(f)
+	if nf != nil {
+		m.store.Add(nf)
+	}
 	if err != nil {
 		return "resend failed: " + err.Error()
 	}
-	m.store.Add(nf)
 	return "resent " + f.Title()
 }
 
@@ -324,19 +330,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitEvent(m.feeds.Events)
 
 	case pauseMsg:
-		m.paused = msg.item.Flow
-		m.pausedMsg = msg.item.Msg
-		m.focus = focusTraffic
-		// Close any open text input. A paused flow is blocking a real client and
-		// the prompt below tells the user to press e/f/d — but a focused input
-		// would swallow those as literal text, and ':f' means filter, not
-		// forward. Whatever was half-typed matters less than the held request.
-		m = m.clearMotion()
-		m.cmdline, m.filtering = false, false
-		m.ci.Blur()
-		m.ci.SetValue("")
-		m.fi.Blur()
-		m.status = "PAUSED: [e]dit  [f]orward  [d]rop"
+		m.enqueuePause(msg.item)
 		return m, waitPause(m.feeds.Pause)
 
 	case tea.MouseMsg:
@@ -466,6 +460,45 @@ func (m *Model) openDetail() {
 	m.viewing = true
 }
 
+func (m Model) forwardTerminalKey(k tea.KeyMsg) {
+	if m.target == nil {
+		return
+	}
+	var b []byte
+	stateful := false
+	if m.screen != nil {
+		if k.Type == tea.KeyRunes && k.Paste {
+			stateful = true
+			b = m.screen.PasteBytes(string(k.Runes))
+		} else if !k.Alt {
+			switch k.Type {
+			case tea.KeyUp:
+				stateful = true
+				b = m.screen.CursorKeyBytes(terminal.CursorUp)
+			case tea.KeyDown:
+				stateful = true
+				b = m.screen.CursorKeyBytes(terminal.CursorDown)
+			case tea.KeyRight:
+				stateful = true
+				b = m.screen.CursorKeyBytes(terminal.CursorRight)
+			case tea.KeyLeft:
+				stateful = true
+				b = m.screen.CursorKeyBytes(terminal.CursorLeft)
+			}
+		}
+	}
+	if !stateful {
+		b = keyBytes(k)
+	}
+	for len(b) > 0 {
+		n, err := m.target.Pty.Write(b)
+		if err != nil || n == 0 {
+			return
+		}
+		b = b[n:]
+	}
+}
+
 func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Leader dispatch: if the previous key was the leader, this key is a command.
 	// A half-typed motion is abandoned on the way out of the traffic pane: it
@@ -474,7 +507,7 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingLeader {
 		return m.clearMotion().leaderCommand(k)
 	}
-	if k.Type == m.km().Leader {
+	if !k.Alt && k.Type == m.km().Leader {
 		m = m.clearMotion()
 		m.pendingLeader = true
 		return m, nil
@@ -482,10 +515,7 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.focus == focusTerminal {
 		m = m.clearMotion()
-		// Forward the keystroke to the child PTY verbatim.
-		if b := keyBytes(k); b != nil && m.target != nil {
-			m.target.Pty.Write(b)
-		}
+		m.forwardTerminalKey(k)
 		return m, nil
 	}
 
@@ -573,15 +603,13 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case ActPausedFwd:
 		if m.paused != nil {
-			m.engine.Resolve(m.paused.ID, intercept.Resolution{Decision: intercept.Forward})
-			m.clearPause()
-			m.status = "forwarded"
+			m.engine.Resolve(m.pausedToken, intercept.Resolution{Decision: intercept.Forward})
+			m.completePause("forwarded")
 		}
 	case ActPausedDrop:
 		if m.paused != nil {
-			m.engine.Resolve(m.paused.ID, intercept.Resolution{Decision: intercept.Drop})
-			m.clearPause()
-			m.status = "dropped"
+			m.engine.Resolve(m.pausedToken, intercept.Resolution{Decision: intercept.Drop})
+			m.completePause("dropped")
 		}
 	case ActHelpToggle:
 		m.showHelp, m.helpScroll = true, 0
@@ -642,12 +670,14 @@ func (m *Model) doInject() string {
 func (m Model) leaderCommand(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.pendingLeader = false
 
-	if k.Type == m.km().Leader {
-		if m.focus == focusTerminal && m.target != nil {
-			// KeyType 1-26 is the ASCII control code, so this is the literal
-			// leader byte whichever ctrl key is configured.
-			m.target.Pty.Write([]byte{byte(m.km().Leader)})
+	if !k.Alt && k.Type == m.km().Leader {
+		if m.focus == focusTerminal {
+			m.forwardTerminalKey(k)
 		}
+		return m, nil
+	}
+	if k.Alt && k.Type == m.km().Leader && m.focus == focusTerminal {
+		m.forwardTerminalKey(k)
 		return m, nil
 	}
 
@@ -715,12 +745,11 @@ func (m Model) onEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.paused != nil {
-			m.engine.Resolve(m.paused.ID, intercept.Resolution{
+			m.engine.Resolve(m.pausedToken, intercept.Resolution{
 				Decision:   intercept.Forward,
 				EditedBody: []byte(m.ta.Value()),
 			})
-			m.clearPause()
-			m.status = "forwarded (edited)"
+			m.completePause("forwarded (edited)")
 		}
 		return m, nil
 	case ActEditorFixLen:
@@ -758,11 +787,49 @@ func (m *Model) enterEdit() {
 	m.status = "EDIT: Ctrl+S forward · Ctrl+L fix len · Esc cancel"
 }
 
-func (m *Model) clearPause() {
+// enqueuePause preserves the active pause until the operator resolves it.
+// Later notifications wait in arrival order and cannot replace an open editor.
+func (m *Model) enqueuePause(item Paused) {
+	if m.paused != nil {
+		m.pauseQueue = append(m.pauseQueue, item)
+		return
+	}
+	m.activatePause(item)
+}
+
+func (m *Model) activatePause(item Paused) {
+	m.paused = item.Flow
+	m.pausedMsg = item.Msg
+	m.pausedToken = item.Token
+	m.focus = focusTraffic
+	// Close text inputs that would swallow the paused-flow shortcuts.
+	m.count, m.pendingG, m.pendingLeader = 0, false, false
+	m.cmdline, m.filtering = false, false
+	m.ci.Blur()
+	m.ci.SetValue("")
+	m.fi.Blur()
+	m.status = "PAUSED: [e]dit  [f]orward  [d]rop"
+}
+
+// completePause clears editor state before promoting the oldest queued pause.
+// Clearing the textarea is part of the invariant: edits belong only to the
+// pause that seeded them and never become the next pause's payload.
+func (m *Model) completePause(doneStatus string) {
 	m.paused = nil
 	m.pausedMsg = nil
+	m.pausedToken = 0
 	m.editing = false
 	m.ta.Blur()
+	m.ta.SetValue("")
+
+	if len(m.pauseQueue) == 0 {
+		m.status = doneStatus
+		return
+	}
+	next := m.pauseQueue[0]
+	m.pauseQueue[0] = Paused{}
+	m.pauseQueue = m.pauseQueue[1:]
+	m.activatePause(next)
 }
 
 func (m *Model) sizeEditor() {

@@ -4,18 +4,22 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
+	"github.com/citizen-123/cli-capture/internal/protocol"
 )
 
 // Template is a parameterized HTTP request. {{name}} markers in the URL, header
 // values, or body are filled in at render time.
 type Template struct {
-	Method string
-	URL    string
-	Header http.Header
-	Body   []byte
-	Secure bool
+	Method   string
+	URL      string
+	Header   http.Header
+	Body     []byte
+	Messages []protocol.GRPCMessage
+	Protocol capture.Protocol
+	Secure   bool
 }
 
 // FromFlow builds a template from a captured flow's request. Only
@@ -29,6 +33,11 @@ func FromFlow(f *capture.Flow) (*Template, error) {
 	default:
 		return nil, fmt.Errorf("repeater: %s flows are not repeatable", f.Protocol)
 	}
+
+	body, err := protocol.CapturedRequestBody(f)
+	if err != nil {
+		return nil, fmt.Errorf("repeater: reconstruct request body: %w", err)
+	}
 	scheme := "http"
 	if f.Secure {
 		scheme = "https"
@@ -38,11 +47,13 @@ func FromFlow(f *capture.Flow) (*Template, error) {
 		method = http.MethodGet
 	}
 	return &Template{
-		Method: method,
-		URL:    scheme + "://" + f.ServerAddr + f.Request.Meta["path"],
-		Header: cloneHeader(f.Request.Headers),
-		Body:   append([]byte(nil), f.Request.Body...),
-		Secure: f.Secure,
+		Method:   method,
+		URL:      scheme + "://" + f.ServerAddr + f.Request.Meta["path"],
+		Header:   cloneHeader(f.Request.Headers),
+		Body:     body.Body,
+		Messages: body.Messages,
+		Protocol: f.Protocol,
+		Secure:   f.Secure,
 	}, nil
 }
 
@@ -76,27 +87,64 @@ func (t *Template) Variables() []string {
 		}
 	}
 	add(string(t.Body))
+	for _, message := range t.Messages {
+		if !message.Compressed {
+			add(string(message.Data))
+		}
+	}
 	return out
 }
 
-// Render substitutes vars and builds a concrete *http.Request. Host and
-// Content-Length are left to the client so a stale captured value can't desync
-// the resend. The returned request's GetBody is set, so the rendered body can
-// be re-read (Send uses this to capture what it sent).
+// Render substitutes vars and builds a concrete *http.Request. Substitution is
+// applied to logical HTTP bodies and uncompressed gRPC payloads before their
+// final wire encoding. Host and Content-Length are always left to the client.
 func (t *Template) Render(vars map[string]string) (*http.Request, error) {
-	url := Substitute(t.URL, vars)
-	body := []byte(Substitute(string(t.Body), vars))
-	req, err := http.NewRequest(t.Method, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	req, _, _, err := t.render(vars)
+	return req, err
+}
+
+func (t *Template) render(vars map[string]string) (*http.Request, protocol.RequestBody, capture.Protocol, error) {
+	proto := t.Protocol
+	if proto == "" {
+		proto = capture.ProtoHTTP1
 	}
+
+	header := make(http.Header, len(t.Header))
 	for k, vals := range t.Header {
-		if k == "Host" || k == "Content-Length" {
+		for _, value := range vals {
+			header.Add(k, Substitute(value, vars))
+		}
+	}
+
+	logical := protocol.RequestBody{
+		Body:     []byte(Substitute(string(t.Body), vars)),
+		Messages: make([]protocol.GRPCMessage, len(t.Messages)),
+	}
+	for i, message := range t.Messages {
+		logical.Messages[i] = protocol.GRPCMessage{
+			Compressed: message.Compressed,
+			Data:       append([]byte(nil), message.Data...),
+		}
+		if !message.Compressed {
+			logical.Messages[i].Data = []byte(Substitute(string(message.Data), vars))
+		}
+	}
+
+	wire, err := protocol.EncodeRequestBody(proto, header, logical)
+	if err != nil {
+		return nil, protocol.RequestBody{}, proto, fmt.Errorf("repeater: reconstruct request body: %w", err)
+	}
+	req, err := http.NewRequest(t.Method, Substitute(t.URL, vars), bytes.NewReader(wire))
+	if err != nil {
+		return nil, protocol.RequestBody{}, proto, err
+	}
+	for k, vals := range header {
+		if strings.EqualFold(k, "Host") || strings.EqualFold(k, "Content-Length") {
 			continue
 		}
-		for _, v := range vals {
-			req.Header.Add(k, Substitute(v, vars))
+		for _, value := range vals {
+			req.Header.Add(k, value)
 		}
 	}
-	return req, nil
+	return req, logical, proto, nil
 }

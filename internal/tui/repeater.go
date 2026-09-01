@@ -113,10 +113,9 @@ func (m Model) onRepeaterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // runRepeater returns a command that sends the request(s). Single mode sends
-// once; attack modes expand the payload lists via repeater.Attack.Jobs and send
-// each. Every result is added to the store, so they stream into the traffic list
-// (which doubles as the results table). Runs off the UI goroutine so a big
-// attack doesn't freeze the interface.
+// once; attack modes enumerate payload combinations and send each inside the
+// command. Every result is added to the store, so it streams into the traffic
+// list (which doubles as the results table) without blocking the UI goroutine.
 func (m Model) runRepeater(tmpl *repeater.Template) tea.Cmd {
 	payloads := repeater.ParsePayloads(m.rep.payload.Value())
 	store := m.store
@@ -151,10 +150,10 @@ func (m Model) runRepeater(tmpl *repeater.Template) tea.Cmd {
 		lists = append(lists, list)
 		base[v] = list[0]
 	}
-	jobs := repeater.Attack{Mode: m.rep.mode, Positions: positions, Lists: lists, Base: base}.Jobs()
+	attack := repeater.Attack{Mode: m.rep.mode, Positions: positions, Lists: lists, Base: base}
 	return func() tea.Msg {
 		n := 0
-		for _, job := range jobs {
+		for job := range attack.Jobs() {
 			if flow, _ := repeater.Send(tmpl, job); flow != nil {
 				if flow.Request != nil {
 					flow.Request.Meta["payload"] = jobLabel(job, positions)

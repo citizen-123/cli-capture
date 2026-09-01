@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
+	"github.com/citizen-123/cli-capture/internal/protocol"
 )
 
 // client goes straight to the origin (like replay), verifying against the system
@@ -19,22 +19,27 @@ var client = &http.Client{Timeout: 30 * time.Second}
 // inspected, exported, or repeated again. This is the single-shot primitive that
 // Repeater calls once and Sniper will call in a loop.
 func Send(t *Template, vars map[string]string) (*capture.Flow, error) {
-	req, err := t.Render(vars)
+	req, logicalBody, proto, err := t.render(vars)
 	if err != nil {
 		return nil, err
 	}
 
-	nf := capture.NewFlow("repeater", authority(t.URL))
+	nf := capture.NewFlow("repeater", req.URL.Host)
 	nf.Secure = t.Secure
-	nf.Protocol = capture.ProtoHTTP1
+	nf.Protocol = proto
 	nf.Request = &capture.Message{
 		Direction: capture.ClientToServer,
 		Timestamp: time.Now(),
 		Summary:   fmt.Sprintf("%s %s (repeat)", req.Method, req.URL.RequestURI()),
 		Headers:   req.Header.Clone(),
-		Body:      requestBody(req),
-		Meta:      map[string]string{"method": req.Method, "path": req.URL.RequestURI()},
+		Body:      append([]byte(nil), logicalBody.Body...),
+		Meta: map[string]string{
+			"method":                        req.Method,
+			"path":                          req.URL.RequestURI(),
+			protocol.BodyRepresentationMeta: protocol.BodyRepresentationDecoded,
+		},
 	}
+	nf.Messages = repeatedGRPCMessages(logicalBody)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -42,9 +47,15 @@ func Send(t *Template, vars map[string]string) (*capture.Flow, error) {
 		nf.Err = err
 		return nf, err
 	}
-	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		err = fmt.Errorf("repeater: read response body: %w", readErr)
+		nf.Status = capture.StatusError
+		nf.Err = err
+		return nf, err
+	}
 
-	body, _ := io.ReadAll(resp.Body)
 	nf.Response = &capture.Message{
 		Direction: capture.ServerToClient,
 		Timestamp: time.Now(),
@@ -58,24 +69,21 @@ func Send(t *Template, vars map[string]string) (*capture.Flow, error) {
 	return nf, nil
 }
 
-// requestBody re-reads the rendered body via the request's GetBody (set by
-// http.NewRequest for byte readers), so the captured flow records what was sent.
-func requestBody(req *http.Request) []byte {
-	if req.GetBody == nil {
-		return nil
+func repeatedGRPCMessages(body protocol.RequestBody) []*capture.Message {
+	messages := make([]*capture.Message, 0, len(body.Messages))
+	for _, grpcMessage := range body.Messages {
+		meta := map[string]string{}
+		if grpcMessage.Compressed {
+			meta["compressed"] = "true"
+		}
+		payload := append([]byte(nil), grpcMessage.Data...)
+		messages = append(messages, &capture.Message{
+			Direction: capture.ClientToServer,
+			Timestamp: time.Now(),
+			Body:      payload,
+			Raw:       append([]byte(nil), payload...),
+			Meta:      meta,
+		})
 	}
-	rc, err := req.GetBody()
-	if err != nil {
-		return nil
-	}
-	defer rc.Close()
-	b, _ := io.ReadAll(rc)
-	return b
-}
-
-func authority(rawURL string) string {
-	if u, err := url.Parse(rawURL); err == nil && u.Host != "" {
-		return u.Host
-	}
-	return rawURL
+	return messages
 }

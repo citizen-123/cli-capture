@@ -23,10 +23,13 @@ type fakeEmulator struct {
 	forwarded []terminal.MouseEvent
 }
 
-func (f *fakeEmulator) Write(p []byte) (int, error)         { return len(p), nil }
-func (f *fakeEmulator) Render(width, height int) string     { return "" }
-func (f *fakeEmulator) Resize(cols, rows int)               {}
-func (f *fakeEmulator) ForwardMouse(ev terminal.MouseEvent) { f.forwarded = append(f.forwarded, ev) }
+func (f *fakeEmulator) Write(p []byte) (int, error)              { return len(p), nil }
+func (f *fakeEmulator) Render(width, height int) string          { return "" }
+func (f *fakeEmulator) Resize(cols, rows int)                    {}
+func (f *fakeEmulator) CursorKeyBytes(terminal.CursorKey) []byte { return nil }
+func (f *fakeEmulator) PasteBytes(text string) []byte            { return []byte(text) }
+func (f *fakeEmulator) Close() error                             { return nil }
+func (f *fakeEmulator) ForwardMouse(ev terminal.MouseEvent)      { f.forwarded = append(f.forwarded, ev) }
 
 func newFlows(n int) []*capture.Flow {
 	flows := make([]*capture.Flow, 0, n)

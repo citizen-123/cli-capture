@@ -1,10 +1,13 @@
 package export
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
@@ -95,5 +98,98 @@ func TestHAR(t *testing.T) {
 	resp := entries[0].(map[string]any)["response"].(map[string]any)
 	if resp["status"].(float64) != 200 {
 		t.Errorf("HAR response status = %v, want 200", resp["status"])
+	}
+}
+
+func TestHARResponseContentRoundTrips(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     []byte
+		mimeType string
+	}{
+		{
+			name:     "PNG",
+			body:     []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x00, 0xff},
+			mimeType: "image/png",
+		},
+		{
+			name:     "protobuf-like invalid UTF-8",
+			body:     []byte{0x0a, 0x03, 0xff, 0x00, 0x80, 0x10, 0x01},
+			mimeType: "application/x-protobuf",
+		},
+		{
+			name:     "valid Unicode",
+			body:     []byte("Hello, 世界 🌍"),
+			mimeType: "text/plain; charset=utf-8",
+		},
+		{
+			name:     "NUL and controls",
+			body:     []byte{'a', 0x00, 0x01, '\n', '\t', 'b'},
+			mimeType: "application/octet-stream",
+		},
+		{
+			name:     "empty",
+			body:     []byte{},
+			mimeType: "text/plain",
+		},
+		{
+			name:     "nil",
+			body:     nil,
+			mimeType: "application/octet-stream",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flow := httpFlow()
+			flow.Response.Body = tt.body
+			flow.Response.Headers["Content-Type"] = []string{tt.mimeType}
+
+			data, err := HAR([]*capture.Flow{flow})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var archive harArchive
+			if err := json.Unmarshal(data, &archive); err != nil {
+				t.Fatalf("unmarshal HAR: %v", err)
+			}
+			response := archive.Log.Entries[0].Response
+			content := response.Content
+
+			var decoded []byte
+			switch content.Encoding {
+			case "":
+				decoded = []byte(content.Text)
+			case "base64":
+				decoded, err = base64.StdEncoding.DecodeString(content.Text)
+				if err != nil {
+					t.Fatalf("decode base64 response content: %v", err)
+				}
+			default:
+				t.Fatalf("unexpected response content encoding %q", content.Encoding)
+			}
+			if !bytes.Equal(decoded, tt.body) {
+				t.Errorf("decoded response body = %v, want %v", decoded, tt.body)
+			}
+			if content.Size != len(tt.body) {
+				t.Errorf("content.size = %d, want %d", content.Size, len(tt.body))
+			}
+			if response.BodySize != len(tt.body) {
+				t.Errorf("response.bodySize = %d, want %d", response.BodySize, len(tt.body))
+			}
+			if content.MimeType != tt.mimeType {
+				t.Errorf("content.mimeType = %q, want %q", content.MimeType, tt.mimeType)
+			}
+			if utf8.Valid(tt.body) {
+				if content.Encoding != "" {
+					t.Errorf("valid UTF-8 encoding = %q, want no encoding", content.Encoding)
+				}
+				if content.Text != string(tt.body) {
+					t.Errorf("readable response text = %q, want %q", content.Text, string(tt.body))
+				}
+			} else if content.Encoding != "base64" {
+				t.Errorf("binary response encoding = %q, want base64", content.Encoding)
+			}
+		})
 	}
 }
