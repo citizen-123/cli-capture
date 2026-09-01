@@ -194,7 +194,7 @@ entirely and the target is an interactive `$SHELL`.
 | `-load <file>` | — | Preload a saved capture session (JSON) into the flow list. |
 | `-leader <key>` | `ctrl+a` | Prefix key for cli-capture's own commands. `ctrl+a` … `ctrl+z`, or `ctrl+space`. Move it if your target app needs the default. |
 | `-transparent <addr>` | off | Also run a transparent-redirect listener at this address (Linux, needs root + nftables/iptables). |
-| `-transparent-uid <uid>` | `-1` | The uid whose traffic the redirect rule targets. |
+| `-transparent-uid <uid>` | `-1` | The uid assigned to the launched target and matched by the redirect rule when `-transparent-apply` is used. |
 | `-transparent-apply` | off | Actually install/remove the redirect rules (needs root); otherwise they're just logged for you to run. |
 
 ### Scope specs
@@ -308,19 +308,24 @@ edits per frame and supports live injection (`n`/`N`).
 ## Transparent mode (Linux, root)
 
 For targets that ignore `HTTP_PROXY`, redirect their traffic at the kernel level.
-Run the target under a **dedicated uid** so only its traffic is redirected (and
-so the proxy's own upstream connections aren't looped back):
+Choose an existing, dedicated non-root uid for the target:
 
 ```bash
 # let cli-capture install & clean up the rules itself (opt-in, root only)
 sudo cli-capture -transparent 127.0.0.1:8081 -transparent-uid 1500 -transparent-apply -- ./target
 ```
 
-It auto-detects **nftables** (preferred) or **iptables**, flushes stale rules
-first, rolls back a partial apply, and removes the rules on exit (including
-SIGINT/SIGTERM). Without `-transparent-apply` it just logs the exact commands for
-you to run. The pre-redirect destination is recovered via `SO_ORIGINAL_DST`
-(IPv4 and IPv6), then runs through the same MITM/scope/intercept pipeline.
+With `-transparent-apply`, cli-capture resolves that account's primary and
+supplementary groups and launches only the target with those credentials.
+cli-capture and its proxy retain their privileged identity, so the proxy's own
+upstream connections do not match the uid redirect; `-transparent-uid 0` is
+rejected because it would also redirect the root proxy. It auto-detects
+**nftables** (preferred) or **iptables**, flushes stale
+rules first, rolls back a partial apply, and removes the rules on exit (including
+SIGINT/SIGTERM). Without `-transparent-apply` it does not change the target's
+credentials and only logs the exact commands for you to run. The pre-redirect
+destination is recovered via `SO_ORIGINAL_DST` (IPv4 and IPv6), then runs through
+the same MITM/scope/intercept pipeline.
 
 ## Sessions & export
 

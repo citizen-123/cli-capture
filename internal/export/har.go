@@ -1,8 +1,10 @@
 package export
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"time"
+	"unicode/utf8"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
@@ -63,6 +65,7 @@ type harContent struct {
 	Size     int    `json:"size"`
 	MimeType string `json:"mimeType"`
 	Text     string `json:"text,omitempty"`
+	Encoding string `json:"encoding,omitempty"`
 }
 
 type harResponse struct {
@@ -117,14 +120,24 @@ func entryFor(f *capture.Flow) harEntry {
 		e.Response.Status = statusCode(f.Response)
 		e.Response.StatusText = f.Response.Meta["status"]
 		e.Response.Headers = harHeaders(f.Response)
-		e.Response.Content = harContent{
-			Size:     len(f.Response.Body),
-			MimeType: headerValue(f.Response, "Content-Type"),
-			Text:     string(f.Response.Body),
-		}
+		e.Response.Content = responseContent(f.Response.Body, headerValue(f.Response, "Content-Type"))
 		e.Response.BodySize = len(f.Response.Body)
 	}
 	return e
+}
+
+func responseContent(body []byte, mimeType string) harContent {
+	content := harContent{
+		Size:     len(body),
+		MimeType: mimeType,
+	}
+	if utf8.Valid(body) {
+		content.Text = string(body)
+		return content
+	}
+	content.Text = base64.StdEncoding.EncodeToString(body)
+	content.Encoding = "base64"
+	return content
 }
 
 func harHeaders(m *capture.Message) []harNVP {

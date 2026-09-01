@@ -202,24 +202,20 @@ type KeyMap struct {
 	binds      map[string]map[string]Action
 }
 
-// leaderTypes maps the key names usable as a leader to their KeyType. Only
-// control keys qualify: the leader has to be a key the target app is unlikely
-// to need, and its literal byte (KeyType 1-26 is the ASCII control code) is
-// what we send when it's pressed twice.
-func leaderTypes() map[string]tea.KeyType {
-	out := map[string]tea.KeyType{}
-	for i := 1; i <= 26; i++ {
+// controlKeyType resolves the control-key spellings Bubble Tea can report to
+// their runtime identity. Ctrl+Space needs one explicit alias because terminals
+// encode it as NUL, which Bubble Tea names "ctrl+@".
+func controlKeyType(name string) (tea.KeyType, bool) {
+	if name == "ctrl+space" {
+		return tea.KeyCtrlAt, true
+	}
+	for i := 0; i <= 26; i++ {
 		kt := tea.KeyType(i)
-		name := tea.Key{Type: kt}.String()
-		if strings.HasPrefix(name, "ctrl+") {
-			out[name] = kt
+		if kt.String() == name && strings.HasPrefix(name, "ctrl+") {
+			return kt, true
 		}
 	}
-	// Ctrl+Space sends NUL, the same byte as Ctrl+@, so bubbletea reports it as
-	// "ctrl+@". Accept the name people actually type — it's a common leader
-	// precisely because no target app claims it.
-	out["ctrl+space"] = tea.KeyCtrlAt
-	return out
+	return 0, false
 }
 
 // DefaultKeyMap is the stock keymap.
@@ -238,9 +234,9 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 	if leader == "" {
 		leader = DefaultLeader
 	}
-	kt, ok := leaderTypes()[leader]
+	kt, ok := controlKeyType(leader)
 	if !ok {
-		return KeyMap{}, fmt.Errorf("keys: leader %q must be a ctrl key (ctrl+a … ctrl+z, excluding ctrl+i and ctrl+m, or ctrl+space)", leader)
+		return KeyMap{}, fmt.Errorf("keys: leader %q must be a ctrl key (ctrl+@, ctrl+a … ctrl+z, excluding ctrl+i and ctrl+m, or ctrl+space)", leader)
 	}
 
 	km := KeyMap{Leader: kt, LeaderName: leader, binds: map[string]map[string]Action{}}
@@ -267,10 +263,15 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 			if action != Unbind && !actionInContext(ctx, action) {
 				return KeyMap{}, fmt.Errorf("keys: %s: action %q is not available in this context (have %v)", ctx, action, contextActions(ctx))
 			}
-			// A key that the leader swallows would never reach this context,
-			// so binding it there is a silent no-op — say so instead.
-			if ctx != ctxLeader && key == leader {
-				return KeyMap{}, fmt.Errorf("keys: %s: %q is the leader, so it never reaches this context", ctx, key)
+			// Runtime leader handling precedes traffic lookup, and the
+			// double-leader branch precedes leader-command lookup. Modal
+			// contexts route around onKey and can bind the same control key.
+			// Compare Bubble Tea's KeyType identity so aliases such as
+			// ctrl+space and ctrl+@ cannot silently evade this check.
+			if ctx == ctxLeader || ctx == ctxTraffic {
+				if bindingType, ok := controlKeyType(key); ok && bindingType == kt {
+					return KeyMap{}, fmt.Errorf("keys: %s: key %q has the same runtime key as leader %q, so it never reaches this context", ctx, key, leader)
+				}
 			}
 			if action == Unbind {
 				// Keep an explicit tombstone. Action still reports this as

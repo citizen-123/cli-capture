@@ -2,13 +2,13 @@ package scope
 
 import "testing"
 
-func mustCond(t *testing.T, spec string) Condition {
+func mustCond(t *testing.T, spec string) *Condition {
 	t.Helper()
 	c, err := ParseCondition(spec)
 	if err != nil {
 		t.Fatalf("ParseCondition(%q): %v", spec, err)
 	}
-	return c
+	return &c
 }
 
 // TestStrategies exercises every match strategy and field, inferred from spec.
@@ -44,13 +44,67 @@ func TestStrategies(t *testing.T) {
 	}
 }
 
+func TestHostStrategiesUseCanonicalDNSCase(t *testing.T) {
+	tests := []struct {
+		name string
+		spec string
+		host string
+	}{
+		{name: "substring lowercase rule", spec: "bank.example", host: "LOGIN.BANK.EXAMPLE"},
+		{name: "substring uppercase rule", spec: "BANK.EXAMPLE", host: "login.bank.example"},
+		{name: "glob lowercase rule", spec: "*.bank.example", host: "LOGIN.BANK.EXAMPLE"},
+		{name: "glob uppercase rule", spec: "*.BANK.EXAMPLE", host: "login.bank.example"},
+		{name: "exact lowercase rule", spec: "=login.bank.example", host: "LOGIN.BANK.EXAMPLE"},
+		{name: "exact uppercase rule", spec: "=LOGIN.BANK.EXAMPLE", host: "login.bank.example"},
+		{name: "IPv4 literal", spec: "=192.0.2.10", host: "192.0.2.10"},
+		{name: "IPv6 hex digits", spec: "=2001:db8::a", host: "2001:DB8::A"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !mustCond(t, tt.spec).Match(Target{Host: tt.host}) {
+				t.Errorf("%q should match host %q", tt.spec, tt.host)
+			}
+		})
+	}
+}
+
+func TestHostRegexRemainsExplicitlyCaseSensitive(t *testing.T) {
+	target := Target{Host: "LOGIN.BANK.EXAMPLE"}
+	if mustCond(t, `host:~^login\.bank\.example$`).Match(target) {
+		t.Error("host regex must retain its authored case semantics")
+	}
+	if !mustCond(t, `host:~(?i)^login\.bank\.example$`).Match(target) {
+		t.Error("host regex with an explicit case-insensitive flag should match")
+	}
+}
+
+func TestNonHostFieldsRemainCaseSensitive(t *testing.T) {
+	target := Target{
+		Method:   "POST",
+		Path:     "/LOGIN",
+		Protocol: "TLS",
+		Body:     []byte("TOKEN=SECRET"),
+	}
+	for _, spec := range []string{
+		"method:=post",
+		"path:=/login",
+		"proto:=tls",
+		"body:secret",
+		"any:secret",
+	} {
+		if mustCond(t, spec).Match(target) {
+			t.Errorf("%q unexpectedly matched differently-cased non-host data", spec)
+		}
+	}
+}
+
 // TestAllowlist: default Exclude, only included hosts are in scope.
 func TestAllowlist(t *testing.T) {
 	s, err := Build([]string{"*.github.com"}, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.InScope(Target{Host: "api.github.com"}) {
+	if !s.InScope(Target{Host: "API.GITHUB.COM"}) {
 		t.Error("github should be in scope")
 	}
 	if s.InScope(Target{Host: "example.com"}) {
@@ -67,7 +121,7 @@ func TestDenylist(t *testing.T) {
 	if !s.InScope(Target{Host: "api.example.com"}) {
 		t.Error("arbitrary host should be in scope under a denylist")
 	}
-	if s.InScope(Target{Host: "x.telemetry.com"}) {
+	if s.InScope(Target{Host: "X.TELEMETRY.COM"}) {
 		t.Error("telemetry should be excluded")
 	}
 	if s.InScope(Target{Host: "api.example.com", Path: "/health"}) {

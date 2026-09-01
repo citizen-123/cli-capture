@@ -87,6 +87,97 @@ func TestNewKeyMapAcceptsCtrlSpace(t *testing.T) {
 	if km.LeaderName != "ctrl+space" {
 		t.Errorf("leader name = %q, want %q — the name is what the help overlay shows", km.LeaderName, "ctrl+space")
 	}
+	out := (Model{}).WithKeys(km).helpView()
+	if !strings.Contains(out, "ctrl+space") || strings.Contains(out, "ctrl+@") {
+		t.Errorf("help should preserve configured leader spelling ctrl+space; got:\n%s", out)
+	}
+}
+
+func TestNewKeyMapRejectsBindingsShadowedByLeaderRuntimeKey(t *testing.T) {
+	contextActions := map[string]Action{
+		ctxLeader:  ActPaneSwitch,
+		ctxTraffic: ActFlowNext,
+	}
+	for _, leader := range []string{"ctrl+space", "ctrl+@"} {
+		for _, key := range []string{"ctrl+space", "ctrl+@"} {
+			for _, ctx := range []string{ctxLeader, ctxTraffic} {
+				name := leader + "/" + key + "/" + ctx
+				t.Run(name, func(t *testing.T) {
+					_, err := NewKeyMap(leader, map[string]map[string]string{
+						ctx: {key: string(contextActions[ctx])},
+					})
+					if err == nil {
+						t.Fatalf("NewKeyMap(%q, binding %q in %s) succeeded, want an error", leader, key, ctx)
+					}
+					for _, want := range []string{
+						"keys: " + ctx,
+						"key \"" + key + "\"",
+						"leader \"" + leader + "\"",
+						"never reaches",
+					} {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("error %q should mention %q", err, want)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestNewKeyMapAllowsBindingWithDifferentControlKeyType(t *testing.T) {
+	km, err := NewKeyMap("ctrl+a", map[string]map[string]string{
+		ctxLeader:  {"ctrl+b": string(ActPaneSwitch)},
+		ctxTraffic: {"ctrl+b": string(ActFlowNext)},
+	})
+	if err != nil {
+		t.Fatalf("NewKeyMap with leader ctrl+a and binding ctrl+b: %v", err)
+	}
+	if got := km.Action(ctxLeader, "ctrl+b"); got != ActPaneSwitch {
+		t.Errorf("leader ctrl+b binding = %q, want %q", got, ActPaneSwitch)
+	}
+	if got := km.Action(ctxTraffic, "ctrl+b"); got != ActFlowNext {
+		t.Errorf("traffic ctrl+b binding = %q, want %q", got, ActFlowNext)
+	}
+}
+
+func TestNewKeyMapAllowsLeaderRuntimeKeyInModalContexts(t *testing.T) {
+	want := map[string]Action{
+		ctxDetail:   ActDetailClose,
+		ctxEditor:   ActEditorCancel,
+		ctxRepeater: ActRepeaterClose,
+	}
+	overrides := map[string]map[string]string{}
+	for ctx, action := range want {
+		// NUL is emitted by Bubble Tea as ctrl+@ even when the configured
+		// leader spelling is ctrl+space.
+		overrides[ctx] = map[string]string{"ctrl+@": string(action)}
+	}
+	km, err := NewKeyMap("ctrl+space", overrides)
+	if err != nil {
+		t.Fatalf("NewKeyMap with modal ctrl+@ bindings: %v", err)
+	}
+	for ctx, action := range want {
+		if got := km.Action(ctx, "ctrl+@"); got != action {
+			t.Errorf("%s ctrl+@ binding = %q, want %q", ctx, got, action)
+		}
+	}
+}
+
+func TestNewKeyMapAllowsAltLeaderBinding(t *testing.T) {
+	km, err := NewKeyMap("ctrl+a", map[string]map[string]string{
+		ctxLeader:  {"alt+ctrl+a": string(ActPaneSwitch)},
+		ctxTraffic: {"alt+ctrl+a": string(ActFlowNext)},
+	})
+	if err != nil {
+		t.Fatalf("NewKeyMap with alt+ctrl+a bindings: %v", err)
+	}
+	if got := km.Action(ctxLeader, "alt+ctrl+a"); got != ActPaneSwitch {
+		t.Errorf("leader alt+ctrl+a binding = %q, want %q", got, ActPaneSwitch)
+	}
+	if got := km.Action(ctxTraffic, "alt+ctrl+a"); got != ActFlowNext {
+		t.Errorf("traffic alt+ctrl+a binding = %q, want %q", got, ActFlowNext)
+	}
 }
 
 func TestNewKeyMapRejectsBadConfig(t *testing.T) {

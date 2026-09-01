@@ -19,9 +19,12 @@ type recordingEmulator struct {
 	forwarded []terminal.MouseEvent
 }
 
-func (e *recordingEmulator) Write(p []byte) (int, error) { return len(p), nil }
-func (e *recordingEmulator) Render(w, h int) string      { return "" }
-func (e *recordingEmulator) Resize(cols, rows int)       {}
+func (e *recordingEmulator) Write(p []byte) (int, error)              { return len(p), nil }
+func (e *recordingEmulator) Render(w, h int) string                   { return "" }
+func (e *recordingEmulator) Resize(cols, rows int)                    {}
+func (e *recordingEmulator) CursorKeyBytes(terminal.CursorKey) []byte { return nil }
+func (e *recordingEmulator) PasteBytes(text string) []byte            { return []byte(text) }
+func (e *recordingEmulator) Close() error                             { return nil }
 func (e *recordingEmulator) ForwardMouse(ev terminal.MouseEvent) {
 	e.forwarded = append(e.forwarded, ev)
 }

@@ -90,9 +90,41 @@ func TestGRPCTamperReaderEditsAndDrops(t *testing.T) {
 		got = append(got, string(m.Data))
 	})
 	io.Copy(io.Discard, fr)
-
 	if len(got) != 2 || got[0] != "keep" || got[1] != "EDITED" {
 		t.Errorf("re-framed messages = %v, want [keep EDITED]", got)
+	}
+}
+
+func TestGRPCFrameCodecPreservesOrderAndCompression(t *testing.T) {
+	want := []GRPCMessage{
+		{Data: []byte("first")},
+		{Compressed: true, Data: []byte("compressed-representation")},
+		{Data: []byte{}},
+	}
+	wire, err := EncodeGRPCFrames(want)
+	if err != nil {
+		t.Fatalf("EncodeGRPCFrames: %v", err)
+	}
+	got, err := DecodeGRPCFrames(wire)
+	if err != nil {
+		t.Fatalf("DecodeGRPCFrames: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("decoded %d messages, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Compressed != want[i].Compressed || !bytes.Equal(got[i].Data, want[i].Data) {
+			t.Errorf("message %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDecodeGRPCFramesRejectsUnsupportedRepresentation(t *testing.T) {
+	if _, err := DecodeGRPCFrames([]byte{2, 0, 0, 0, 0}); err == nil {
+		t.Fatal("expected invalid compression flag to fail")
+	}
+	if _, err := DecodeGRPCFrames([]byte{0, 0, 0, 0, 2, 1}); err == nil {
+		t.Fatal("expected partial payload to fail")
 	}
 }
 

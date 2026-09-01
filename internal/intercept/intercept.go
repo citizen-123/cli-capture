@@ -21,7 +21,12 @@ const (
 	Drop                    // abort this message
 )
 
-// Resolution is what the UI sends back to release a paused flow.
+// PauseToken uniquely identifies one blocking pause occurrence. It is
+// independent of the flow because a flow can have multiple messages paused at
+// the same time. The zero value is never issued.
+type PauseToken uint64
+
+// Resolution is what the UI sends back to release a paused message.
 type Resolution struct {
 	Decision Decision
 	// EditedBody, when non-nil, replaces the outgoing bytes. nil means
@@ -31,23 +36,27 @@ type Resolution struct {
 
 // Engine implements protocol.Tamperer.
 type Engine struct {
-	mu          sync.Mutex
-	reqEnabled  bool
-	respEnabled bool
-	scope       *scope.Set
-	pending     map[string]chan Resolution  // keyed by flow ID
-	sessions    map[string]capture.Injector // live injectable sessions, by flow ID
+	mu             sync.Mutex
+	reqEnabled     bool
+	respEnabled    bool
+	scope          *scope.Set
+	nextPauseToken PauseToken
+	pending        map[PauseToken]chan Resolution
+	pausedByFlow   map[*capture.Flow]int
+	sessions       map[string]capture.Injector // live injectable sessions, by flow ID
 
-	// onPause is called (off the UI goroutine) when a flow becomes paused, so
-	// the TUI can surface it. It carries the specific outgoing message being
-	// tampered (msg.Raw is what the editor seeds from). Set by cmd/ wiring.
-	onPause func(*capture.Flow, *capture.Message)
+	// onPause is called (off the UI goroutine) when a message becomes paused, so
+	// the TUI can surface it. It carries the token needed to resolve this exact
+	// pause and the outgoing message being tampered (msg.Raw seeds the editor).
+	// Set by cmd/ wiring.
+	onPause func(PauseToken, *capture.Flow, *capture.Message)
 }
 
 func NewEngine() *Engine {
 	return &Engine{
-		pending:  make(map[string]chan Resolution),
-		sessions: make(map[string]capture.Injector),
+		pending:      make(map[PauseToken]chan Resolution),
+		pausedByFlow: make(map[*capture.Flow]int),
+		sessions:     make(map[string]capture.Injector),
 	}
 }
 
@@ -112,7 +121,7 @@ func (e *Engine) InterceptResponses() bool {
 	return e.respEnabled
 }
 
-func (e *Engine) OnPause(fn func(*capture.Flow, *capture.Message)) {
+func (e *Engine) OnPause(fn func(PauseToken, *capture.Flow, *capture.Message)) {
 	e.mu.Lock()
 	e.onPause = fn
 	e.mu.Unlock()
@@ -151,52 +160,78 @@ func (e *Engine) inScopeAnd(directionOn bool, f *capture.Flow) bool {
 }
 
 // pause is the shared intercept handshake. If this direction is enabled and the
-// flow is in scope, it marks the flow pending, notifies the UI, and blocks the
-// calling (per-connection) goroutine until the UI resolves it. It never blocks
-// the UI goroutine — the proxy runs one goroutine per connection, so only that
-// connection stalls. Request and response never pause concurrently for the same
-// flow (they are sequential), so keying pending by flow ID is safe.
+// flow is in scope, it marks the flow pending, registers a unique pause token,
+// notifies the UI, and blocks the calling (per-connection) goroutine until the
+// UI resolves that token. It never blocks the UI goroutine.
 func (e *Engine) pause(f *capture.Flow, msg *capture.Message, directionOn bool) (out []byte, drop bool) {
 	if !e.inScopeAnd(directionOn, f) {
 		return nil, false // pass through original, unchanged
 	}
 
+	ch := make(chan Resolution, 1)
 	e.mu.Lock()
+	var token PauseToken
+	for {
+		e.nextPauseToken++
+		token = e.nextPauseToken
+		if token == 0 {
+			continue
+		}
+		if _, exists := e.pending[token]; !exists {
+			break
+		}
+	}
+	e.pending[token] = ch
+	e.pausedByFlow[f]++
+	f.Status = capture.StatusPending
 	onPause := e.onPause
 	e.mu.Unlock()
 
-	ch := make(chan Resolution, 1)
-	e.mu.Lock()
-	e.pending[f.ID] = ch
-	e.mu.Unlock()
+	// Claim-based Resolve normally removes the entry. The conditional deferred
+	// cleanup also covers a panicking callback without deleting a token that may
+	// have been reused after counter wrap.
+	defer func() {
+		e.mu.Lock()
+		if e.pending[token] == ch {
+			delete(e.pending, token)
+		}
+		remaining := e.pausedByFlow[f] - 1
+		if remaining == 0 {
+			delete(e.pausedByFlow, f)
+			f.Status = capture.StatusActive
+		} else {
+			e.pausedByFlow[f] = remaining
+		}
+		e.mu.Unlock()
+	}()
 
-	f.Status = capture.StatusPending
 	if onPause != nil {
-		onPause(f, msg)
+		onPause(token, f, msg)
 	}
 
 	res := <-ch // block until the UI calls Resolve
-
-	e.mu.Lock()
-	delete(e.pending, f.ID)
-	e.mu.Unlock()
-
-	f.Status = capture.StatusActive
 	if res.Decision == Drop {
 		return nil, true
 	}
 	return res.EditedBody, false
 }
 
-// Resolve releases a paused flow. Called from the UI when the user forwards,
-// drops, or forwards-with-edits. Safe to call for an unknown id (no-op).
-func (e *Engine) Resolve(flowID string, res Resolution) {
+// Resolve releases one paused message. It returns false without blocking when
+// token is unknown or was already resolved.
+func (e *Engine) Resolve(token PauseToken, res Resolution) bool {
 	e.mu.Lock()
-	ch := e.pending[flowID]
-	e.mu.Unlock()
-	if ch != nil {
-		ch <- res
+	ch, ok := e.pending[token]
+	if ok {
+		// Claim this pause while holding the lock so concurrent or duplicate
+		// resolutions cannot both send to its channel.
+		delete(e.pending, token)
 	}
+	e.mu.Unlock()
+	if !ok {
+		return false
+	}
+	ch <- res
+	return true
 }
 
 // TargetFromFlow projects a capture.Flow onto the neutral scope.Target the

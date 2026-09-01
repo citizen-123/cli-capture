@@ -1,5 +1,7 @@
 package repeater
 
+import "iter"
+
 // AttackMode selects how payload lists are paired with insertion points, mirror-
 // ing Burp Intruder's modes.
 type AttackMode int
@@ -48,87 +50,106 @@ type Attack struct {
 	Base      map[string]string
 }
 
-// Jobs computes the ordered sequence of variable maps to send — one per request.
-// Callers feed each map to Send; Jobs itself does no I/O, so the combinatorics
-// are fully testable.
-func (a Attack) Jobs() []map[string]string {
-	switch a.Mode {
-	case Sniper:
-		return a.sniper()
-	case BatteringRam:
-		return a.batteringRam()
-	case Pitchfork:
-		return a.pitchfork()
-	case ClusterBomb:
-		return a.clusterBomb()
-	default:
-		return []map[string]string{a.base()}
+// Jobs returns the ordered sequence of variable maps to send, one per request.
+// The map is reused between yields to keep large attacks bounded; callers that
+// retain a job after the next yield must clone it.
+func (a Attack) Jobs() iter.Seq[map[string]string] {
+	return func(yield func(map[string]string) bool) {
+		job := a.base()
+
+		switch a.Mode {
+		case Sniper:
+			for i, pos := range a.Positions {
+				if i >= len(a.Lists) {
+					return
+				}
+				baseline, hasBaseline := a.Base[pos]
+				for _, payload := range a.Lists[i] {
+					job[pos] = payload
+					if !yield(job) {
+						return
+					}
+				}
+				if hasBaseline {
+					job[pos] = baseline
+				} else {
+					delete(job, pos)
+				}
+			}
+
+		case BatteringRam:
+			if len(a.Lists) == 0 {
+				return
+			}
+			for _, payload := range a.Lists[0] {
+				for _, pos := range a.Positions {
+					job[pos] = payload
+				}
+				if !yield(job) {
+					return
+				}
+			}
+
+		case Pitchfork:
+			n := -1
+			for i := range a.Positions {
+				if i >= len(a.Lists) {
+					return
+				}
+				if l := len(a.Lists[i]); n < 0 || l < n {
+					n = l
+				}
+			}
+			for k := 0; k < n; k++ {
+				for i, pos := range a.Positions {
+					job[pos] = a.Lists[i][k]
+				}
+				if !yield(job) {
+					return
+				}
+			}
+
+		case ClusterBomb:
+			a.clusterBomb(job, yield)
+
+		default:
+			yield(job)
+		}
 	}
 }
 
-func (a Attack) sniper() []map[string]string {
-	var jobs []map[string]string
-	for i, pos := range a.Positions {
-		if i >= len(a.Lists) {
-			break
-		}
-		for _, payload := range a.Lists[i] {
-			j := a.base()
-			j[pos] = payload
-			jobs = append(jobs, j)
+func (a Attack) clusterBomb(job map[string]string, yield func(map[string]string) bool) {
+	n := min(len(a.Lists), len(a.Positions))
+	if n == 0 {
+		yield(job)
+		return
+	}
+	for _, list := range a.Lists[:n] {
+		if len(list) == 0 {
+			return
 		}
 	}
-	return jobs
-}
 
-func (a Attack) batteringRam() []map[string]string {
-	if len(a.Lists) == 0 {
-		return nil
-	}
-	var jobs []map[string]string
-	for _, payload := range a.Lists[0] {
-		j := a.base()
-		for _, pos := range a.Positions {
-			j[pos] = payload
+	indices := make([]int, n)
+	for {
+		for i := range n {
+			job[a.Positions[i]] = a.Lists[i][indices[i]]
 		}
-		jobs = append(jobs, j)
-	}
-	return jobs
-}
+		if !yield(job) {
+			return
+		}
 
-func (a Attack) pitchfork() []map[string]string {
-	n := -1
-	for i := range a.Positions {
-		if i >= len(a.Lists) {
-			n = 0
-			break
-		}
-		if l := len(a.Lists[i]); n < 0 || l < n {
-			n = l
+		for i := n - 1; i >= 0; i-- {
+			indices[i]++
+			if indices[i] < len(a.Lists[i]) {
+				break
+			}
+			indices[i] = 0
+			if i == 0 {
+				return
+			}
 		}
 	}
-	var jobs []map[string]string
-	for k := 0; k < n; k++ {
-		j := a.base()
-		for i, pos := range a.Positions {
-			j[pos] = a.Lists[i][k]
-		}
-		jobs = append(jobs, j)
-	}
-	return jobs
-}
-
-func (a Attack) clusterBomb() []map[string]string {
-	combos := product(a.Lists[:min(len(a.Lists), len(a.Positions))])
-	var jobs []map[string]string
-	for _, combo := range combos {
-		j := a.base()
-		for i, val := range combo {
-			j[a.Positions[i]] = val
-		}
-		jobs = append(jobs, j)
-	}
-	return jobs
 }
 
 func (a Attack) base() map[string]string {
@@ -137,24 +158,4 @@ func (a Attack) base() map[string]string {
 		out[k] = v
 	}
 	return out
-}
-
-// product returns the cartesian product of the given lists. An empty input (or a
-// list with zero items) yields no combinations.
-func product(lists [][]string) [][]string {
-	result := [][]string{{}}
-	for _, list := range lists {
-		if len(list) == 0 {
-			return nil
-		}
-		var next [][]string
-		for _, combo := range result {
-			for _, item := range list {
-				c := append(append([]string{}, combo...), item)
-				next = append(next, c)
-			}
-		}
-		result = next
-	}
-	return result
 }

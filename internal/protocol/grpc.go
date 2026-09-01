@@ -14,6 +14,59 @@ type GRPCMessage struct {
 	Data       []byte
 }
 
+// EncodeGRPCFrames serializes messages into the gRPC wire format while
+// preserving their order and per-message compression flag.
+func EncodeGRPCFrames(messages []GRPCMessage) ([]byte, error) {
+	var out bytes.Buffer
+	for _, message := range messages {
+		if err := writeGRPCFrame(&out, message); err != nil {
+			return nil, err
+		}
+	}
+	return out.Bytes(), nil
+}
+
+func writeGRPCFrame(w io.Writer, message GRPCMessage) error {
+	if uint64(len(message.Data)) > uint64(^uint32(0)) {
+		return fmt.Errorf("gRPC message is too large to frame: %d bytes", len(message.Data))
+	}
+	var header [5]byte
+	if message.Compressed {
+		header[0] = 1
+	}
+	binary.BigEndian.PutUint32(header[1:], uint32(len(message.Data)))
+	if _, err := w.Write(header[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(message.Data)
+	return err
+}
+
+// DecodeGRPCFrames parses a complete gRPC request body. Unlike the streaming
+// observer, it rejects partial frames and invalid compression flags.
+func DecodeGRPCFrames(body []byte) ([]GRPCMessage, error) {
+	var messages []GRPCMessage
+	for len(body) > 0 {
+		if len(body) < 5 {
+			return nil, fmt.Errorf("incomplete gRPC frame header: %d trailing bytes", len(body))
+		}
+		if body[0] != 0 && body[0] != 1 {
+			return nil, fmt.Errorf("unsupported gRPC compression flag %d", body[0])
+		}
+		length := uint64(binary.BigEndian.Uint32(body[1:5]))
+		if length > uint64(len(body)-5) {
+			return nil, fmt.Errorf("incomplete gRPC frame payload: declared %d bytes, have %d", length, len(body)-5)
+		}
+		end := 5 + int(length)
+		messages = append(messages, GRPCMessage{
+			Compressed: body[0] == 1,
+			Data:       append([]byte(nil), body[5:end]...),
+		})
+		body = body[end:]
+	}
+	return messages, nil
+}
+
 // grpcFramer is a pass-through io.Reader that parses gRPC length-prefixed
 // messages out of the stream as they flow, calling onMessage for each complete
 // message. It never alters the bytes — it only observes — so it is safe to
@@ -124,20 +177,8 @@ func (g *grpcTamperReader) drain() {
 		if out == nil {
 			out = msg.Data
 		}
-		g.writeFrame(msg.Compressed, out)
+		_ = writeGRPCFrame(&g.out, GRPCMessage{Compressed: msg.Compressed, Data: out})
 	}
-}
-
-func (g *grpcTamperReader) writeFrame(compressed bool, data []byte) {
-	var flag byte
-	if compressed {
-		flag = 1
-	}
-	g.out.WriteByte(flag)
-	var l [4]byte
-	binary.BigEndian.PutUint32(l[:], uint32(len(data)))
-	g.out.Write(l[:])
-	g.out.Write(data)
 }
 
 // ProtoFieldSummary walks protobuf wire format and returns a compact,

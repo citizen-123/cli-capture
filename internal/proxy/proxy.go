@@ -53,9 +53,9 @@ func (p *Proxy) upstreamConfig(sni string) *tls.Config {
 
 // SetMITMPolicy sets which TLS hosts get man-in-the-middled. A nil policy (the
 // default) MITMs every host. In-scope ⇒ intercept; out-of-scope ⇒ blind tunnel
-// (the encrypted bytes are forwarded untouched and only counted). The decision
-// is made from the CONNECT host, the only identity known before the TLS
-// handshake — SNI-based policy would require peeking the ClientHello first.
+// (the encrypted bytes are forwarded untouched and only counted). CONNECT
+// policy uses its requested host; transparent TLS policy uses ClientHello SNI,
+// falling back to the numeric original destination when SNI is absent.
 func (p *Proxy) SetMITMPolicy(s *scope.Set) { p.mitm = s }
 
 func (p *Proxy) shouldMITM(host string) bool {
@@ -143,9 +143,9 @@ func (p *Proxy) handleConnect(conn net.Conn, br *bufio.Reader) {
 }
 
 // interceptTLS runs the man-in-the-middle (or blind passthrough) for a TLS
-// connection whose real destination is target ("host:port"). It is the shared
-// core of both the CONNECT proxy and transparent mode: everything from the MITM
-// decision through TLS termination, the h2/h1 split, and the upstream dial.
+// connection whose real destination is target ("host:port"). host is the
+// CONNECT host or transparent ClientHello SNI, and is also the no-SNI fallback.
+// The rest of the TLS termination and upstream pipeline is shared.
 func (p *Proxy) interceptTLS(client net.Conn, target, host string) {
 	// Policy: out-of-scope TLS hosts are tunneled blind (never decrypted).
 	if !p.shouldMITM(host) {
@@ -209,7 +209,14 @@ func (p *Proxy) HandleTransparent(conn net.Conn, target string) {
 		return
 	}
 	if first[0] == 0x16 { // TLS handshake record type
-		p.interceptTLS(rw(conn, br), target, host)
+		serverName, replay, err := sniffClientHello(rw(conn, br))
+		if err != nil {
+			return
+		}
+		if serverName != "" {
+			host = serverName
+		}
+		p.interceptTLS(replay, target, host)
 		return
 	}
 	// Plaintext: dial the origin and bridge (HTTP/1, WebSocket, or raw TCP).
@@ -301,6 +308,16 @@ func (p *Proxy) passthrough(client net.Conn, target, host string) {
 	touch()
 }
 
+type connectionProtocol interface {
+	HandleConnection(
+		f *capture.Flow,
+		client, server *bufio.ReadWriter,
+		clientConn, serverConn net.Conn,
+		tamper protocol.Tamperer,
+		touch func(),
+	) error
+}
+
 // bridge is the shared hand-off: detect the protocol from the first client
 // bytes, register the flow, and let the protocol drive both directions.
 func (p *Proxy) bridge(flow *capture.Flow, client, server net.Conn) {
@@ -313,7 +330,13 @@ func (p *Proxy) bridge(flow *capture.Flow, client, server net.Conn) {
 	p.store.Add(flow)
 	touch := func() { p.store.Touch(flow) }
 
-	if err := proto.Handle(flow, clientRW, serverRW, p.tamper, touch); err != nil {
+	var err error
+	if handler, ok := proto.(connectionProtocol); ok {
+		err = handler.HandleConnection(flow, clientRW, serverRW, client, server, p.tamper, touch)
+	} else {
+		err = proto.Handle(flow, clientRW, serverRW, p.tamper, touch)
+	}
+	if err != nil {
 		log.Printf("proxy: flow %s handle error: %v", flow.ID, err)
 	}
 }
