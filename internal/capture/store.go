@@ -2,11 +2,15 @@ package capture
 
 import "sync"
 
-// Event describes a change to the Store. The TUI translates these into
-// tea.Msg values so the Elm-style update loop stays the single UI writer.
+// Event is a compact Store invalidation. Consumers refresh the canonical
+// snapshot with List or Get; it deliberately does not carry a captured flow.
+// Flow is retained only as a compatibility summary (ID, status, and flag) for
+// older consumers and contains no request, response, message, or endpoint data.
 type Event struct {
-	Flow *Flow
-	Kind EventKind
+	FlowID  string
+	Version uint64
+	Kind    EventKind
+	Flow    *Flow
 }
 
 type EventKind int
@@ -20,74 +24,184 @@ const (
 // the UI reads and subscribes. It intentionally keeps flows in insertion order
 // so the list pane is stable.
 type Store struct {
-	mu    sync.RWMutex
-	order []string
-	byID  map[string]*Flow
-	subs  []chan Event
+	mu      sync.RWMutex
+	order   []string
+	byID    map[string]*Flow
+	bytes   map[string]int
+	total   int
+	version uint64
+	subs    []*subscriber
+}
+
+// subscriber holds one coalesced invalidation. A slow UI needs only the newest
+// version: after any event it reloads Store state, so retaining every
+// intermediate capture snapshot is both redundant and unbounded by bytes.
+type subscriber struct {
+	mu sync.Mutex
+	ch chan Event
+}
+
+func (sub *subscriber) publish(event Event) {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+
+	select {
+	case queued := <-sub.ch:
+		if queued.Version > event.Version {
+			event = queued
+		}
+	default:
+	}
+	sub.ch <- event
 }
 
 func NewStore() *Store {
-	return &Store{byID: make(map[string]*Flow)}
+	return &Store{
+		byID:  make(map[string]*Flow),
+		bytes: make(map[string]int),
+	}
 }
 
-// Add records a new flow and notifies subscribers.
+// Add records an owned snapshot and notifies subscribers. The caller may keep
+// mutating f for forwarding; its maps and slices never become Store state.
 func (s *Store) Add(f *Flow) {
+	if f == nil {
+		return
+	}
+	limitFlow(f)
+	owned := f.Snapshot()
 	s.mu.Lock()
-	s.byID[f.ID] = f
-	s.order = append(s.order, f.ID)
+	_, exists := s.byID[owned.ID]
+	if !exists {
+		s.order = append(s.order, owned.ID)
+	} else {
+		s.total -= s.bytes[owned.ID]
+	}
+	s.byID[owned.ID] = owned
+	s.bytes[owned.ID] = flowBytes(owned)
+	s.total += s.bytes[owned.ID]
+	s.evictLocked()
+	kind := FlowAdded
+	if exists {
+		kind = FlowUpdated
+	}
+	event := s.eventLocked(owned, kind)
 	s.mu.Unlock()
-	s.publish(Event{Flow: f, Kind: FlowAdded})
+
+	s.publish(event)
 }
 
-// Touch notifies subscribers that an already-stored flow changed in place.
-// The proxy mutates the *Flow directly (it holds the pointer) and then calls
-// Touch so the UI knows to re-render.
+// Touch replaces the stored snapshot with the flow's current owned state.
+// Producers must use Flow.Mutate for writes that can race another producer.
 func (s *Store) Touch(f *Flow) {
-	s.publish(Event{Flow: f, Kind: FlowUpdated})
+	if f == nil {
+		return
+	}
+	limitFlow(f)
+	owned := f.Snapshot()
+	s.mu.Lock()
+	if _, exists := s.byID[owned.ID]; !exists {
+		s.order = append(s.order, owned.ID)
+	} else {
+		s.total -= s.bytes[owned.ID]
+	}
+	s.byID[owned.ID] = owned
+	s.bytes[owned.ID] = flowBytes(owned)
+	s.total += s.bytes[owned.ID]
+	s.evictLocked()
+	event := s.eventLocked(owned, FlowUpdated)
+	s.mu.Unlock()
+
+	s.publish(event)
 }
 
-// List returns a snapshot of flows in insertion order. Callers get copies of
-// the slice, not the underlying flows, so iteration is race-free even while
-// the proxy keeps mutating flow contents.
+func (s *Store) evictLocked() {
+	for len(s.order) > MaxFlowsInStore || (s.total > MaxRetainedStoreBytes && len(s.order) > 1) {
+		id := s.order[0]
+		delete(s.byID, id)
+		s.total -= s.bytes[id]
+		delete(s.bytes, id)
+		copy(s.order, s.order[1:])
+		s.order[len(s.order)-1] = ""
+		s.order = s.order[:len(s.order)-1]
+	}
+}
+
+// SetFlagged changes the canonical stored snapshot rather than a caller-owned
+// copy, then publishes a compact invalidation.
+func (s *Store) SetFlagged(id string, flagged bool) bool {
+	s.mu.Lock()
+	f, ok := s.byID[id]
+	var event Event
+	if ok {
+		f.Flagged = flagged
+		event = s.eventLocked(f, FlowUpdated)
+	}
+	s.mu.Unlock()
+	if ok {
+		s.publish(event)
+	}
+	return ok
+}
+
+// List returns deep snapshots in insertion order. Callers cannot mutate Store
+// state or race a producer by retaining a returned Flow.
 func (s *Store) List() []*Flow {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	out := make([]*Flow, 0, len(s.order))
 	for _, id := range s.order {
-		out = append(out, s.byID[id])
+		out = append(out, cloneFlow(s.byID[id]))
 	}
+	s.mu.RUnlock()
 	return out
 }
 
-// Get returns a flow by id.
+// Get returns an independent deep snapshot of the flow identified by id.
 func (s *Store) Get(id string) (*Flow, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	f, ok := s.byID[id]
-	return f, ok
-}
-
-// Subscribe returns a channel that receives every subsequent Event. The buffer
-// keeps a burst of captures from blocking the proxy on a slow UI.
-func (s *Store) Subscribe() <-chan Event {
-	ch := make(chan Event, 256)
-	s.mu.Lock()
-	s.subs = append(s.subs, ch)
-	s.mu.Unlock()
-	return ch
-}
-
-func (s *Store) publish(ev Event) {
-	s.mu.RLock()
-	subs := s.subs
+	out := cloneFlow(f)
 	s.mu.RUnlock()
-	for _, ch := range subs {
-		// Non-blocking: if a subscriber is wedged we drop the event rather
-		// than stall traffic. The UI does a full List() on resize/refresh so
-		// a dropped incremental update is self-healing.
-		select {
-		case ch <- ev:
-		default:
+	return out, ok
+}
+
+// Subscribe returns a channel that receives a coalesced latest-version
+// invalidation. Its one-event capacity is independent of capture size, so a
+// stalled consumer cannot duplicate Store's retained bodies.
+func (s *Store) Subscribe() <-chan Event {
+	sub := &subscriber{ch: make(chan Event, 1)}
+	s.mu.Lock()
+	s.subs = append(s.subs, sub)
+	s.mu.Unlock()
+	return sub.ch
+}
+
+func (s *Store) eventLocked(flow *Flow, kind EventKind) Event {
+	s.version++
+	return Event{
+		FlowID:  flow.ID,
+		Version: s.version,
+		Kind:    kind,
+		Flow: &Flow{
+			ID:      flow.ID,
+			Status:  flow.Status,
+			Flagged: flow.Flagged,
+		},
+	}
+}
+
+func (s *Store) publish(event Event) {
+	s.mu.RLock()
+	subs := append([]*subscriber(nil), s.subs...)
+	s.mu.RUnlock()
+	for _, sub := range subs {
+		// Give each consumer an independent metadata summary. No full flow is
+		// ever enqueued, and subscriber.publish replaces stale invalidations.
+		copy := event
+		if event.Flow != nil {
+			flow := *event.Flow
+			copy.Flow = &flow
 		}
+		sub.publish(copy)
 	}
 }

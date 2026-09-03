@@ -4,9 +4,11 @@ package runner
 // fields stay private so callers cannot construct a partial identity that
 // accidentally retains the parent's primary or supplementary groups.
 type UserCredentials struct {
-	uid    uint32
-	gid    uint32
-	groups []uint32
+	uid      uint32
+	gid      uint32
+	groups   []uint32
+	username string
+	home     string
 }
 
 // LookupUserCredentials resolves uid's primary group and supplementary groups.

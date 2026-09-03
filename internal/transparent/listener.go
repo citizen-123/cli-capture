@@ -1,6 +1,9 @@
 package transparent
 
-import "net"
+import (
+	"fmt"
+	"net"
+)
 
 // Handler processes one redirected connection given its original destination
 // ("host:port"). Typically wired to proxy.HandleTransparent.
@@ -12,9 +15,28 @@ type Listener struct {
 	ln net.Listener
 }
 
+// ValidateListenAddress rejects transparent listeners that are not bound
+// directly to a numeric loopback address. The listener is fed by local
+// netfilter REDIRECT rules; resolving a hostname before binding would permit
+// its answer to change after validation.
+func ValidateListenAddress(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("transparent listener address %q must be host:port: %w", addr, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("transparent listener address %q must use a numeric loopback IP", addr)
+	}
+	return nil
+}
+
 // Listen binds the transparent-proxy socket. This must be the address the
 // netfilter REDIRECT rule targets.
 func Listen(addr string) (*Listener, error) {
+	if err := ValidateListenAddress(addr); err != nil {
+		return nil, err
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err

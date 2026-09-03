@@ -29,6 +29,40 @@ func (upperTamper) BeforeDeliver(_ *capture.Flow, _ *capture.Message) ([]byte, b
 func (upperTamper) ShouldInterceptRequest(*capture.Flow) bool  { return false }
 func (upperTamper) ShouldInterceptResponse(*capture.Flow) bool { return false }
 
+type responseUpperTamper struct{ upperTamper }
+
+func (responseUpperTamper) BeforeForward(_ *capture.Flow, _ *capture.Message) ([]byte, bool) {
+	return nil, false
+}
+
+func (responseUpperTamper) BeforeDeliver(_ *capture.Flow, msg *capture.Message) ([]byte, bool) {
+	return bytes.ToUpper(msg.Raw), false
+}
+
+func TestPumpWSTampersServerFrames(t *testing.T) {
+	var srcBytes, dstBytes bytes.Buffer
+	srcBytes.Write((&wsFrame{Fin: true, Opcode: opText, Payload: []byte("hello")}).encode())
+	srcBytes.Write((&wsFrame{Fin: true, Opcode: opClose}).encode())
+	src := bufio.NewReadWriter(bufio.NewReader(&srcBytes), bufio.NewWriter(&bytes.Buffer{}))
+	clientRW := bufio.NewReadWriter(bufio.NewReader(&bytes.Buffer{}), bufio.NewWriter(&dstBytes))
+	session := &wsSession{client: clientRW, server: src}
+
+	flow := capture.NewFlow("c", "s:443")
+	if err := pumpWS(session, src, flow, capture.ServerToClient, responseUpperTamper{}, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(flow.Messages[0].Body); got != "hello" {
+		t.Fatalf("recorded body = %q, want original", got)
+	}
+	fr, err := readWSFrame(bufio.NewReader(&dstBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(fr.Payload); got != "HELLO" {
+		t.Fatalf("delivered payload = %q, want response tamper output", got)
+	}
+}
+
 func TestPumpWSCapturesAndTampers(t *testing.T) {
 	// src: a masked text frame "hello" followed by a masked close frame.
 	var srcBytes bytes.Buffer
@@ -235,7 +269,7 @@ func TestWebSocketRejectionWriteFailureIsError(t *testing.T) {
 	err := relayWebSocketRejection(
 		flow,
 		&http.Request{Method: "GET"},
-		"HTTP/1.1 400 Bad Request\r\n",
+		[]byte("HTTP/1.1 400 Bad Request\r\n"),
 		server,
 		client,
 		func() {},
@@ -346,6 +380,56 @@ func TestWebSocketHandleConnectionEndsWhenUpstreamCloses(t *testing.T) {
 	}
 	if len(flow.Messages) != 1 || string(flow.Messages[0].Body) != "ready" {
 		t.Fatalf("captured frames = %#v, want one ready frame", flow.Messages)
+	}
+}
+
+func TestWebSocketHandleConnectionClosesPeerAfterFrameError(t *testing.T) {
+	handshake := []byte("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+	invalidFrame := []byte{0x80 | 0x40 | opText, 0} // RSV1 is not negotiated.
+
+	clientConn, clientPeer := net.Pipe()
+	serverConn, serverPeer := net.Pipe()
+	defer clientConn.Close()
+	defer clientPeer.Close()
+	defer serverConn.Close()
+	defer serverPeer.Close()
+
+	originDone := make(chan error, 1)
+	go func() {
+		_, err := http.ReadRequest(bufio.NewReader(serverPeer))
+		if err == nil {
+			_, err = serverPeer.Write(append(handshake, invalidFrame...))
+		}
+		originDone <- err
+	}()
+
+	flow := capture.NewFlow("client", "example.test:80")
+	handleDone := make(chan error, 1)
+	go func() {
+		client := bufio.NewReadWriter(bufio.NewReader(clientConn), bufio.NewWriter(clientConn))
+		server := bufio.NewReadWriter(bufio.NewReader(serverConn), bufio.NewWriter(serverConn))
+		handleDone <- (HTTP1{}).HandleConnection(flow, client, server, clientConn, serverConn, nil, func() {})
+	}()
+
+	if _, err := io.WriteString(clientPeer, "GET /socket HTTP/1.1\r\nHost: example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(clientPeer); err != nil {
+		t.Fatalf("client did not receive EOF after frame error: %v", err)
+	}
+	if err := <-originDone; err != nil {
+		t.Fatalf("origin: %v", err)
+	}
+	select {
+	case err := <-handleDone:
+		if err == nil {
+			t.Fatal("invalid WebSocket frame did not fail the handler")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket relay stayed blocked after frame error")
+	}
+	if flow.Status != capture.StatusError {
+		t.Fatalf("flow status = %v, want error", flow.Status)
 	}
 }
 

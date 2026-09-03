@@ -113,8 +113,9 @@ func humanSize(n int) string {
 	}
 }
 
-// rowTitle is the flow's title, plus the payload for attack results so a Sniper
-// run reads as "same request, varying payload, varying status/size".
+// rowTitle is terminal-safe before it reaches either the list or a modal
+// title. Flow titles and repeater payload labels both originate in captured
+// traffic and can therefore contain terminal control sequences.
 func rowTitle(f *capture.Flow) string {
 	t := f.Title()
 	if f.Request != nil {
@@ -122,7 +123,7 @@ func rowTitle(f *capture.Flow) string {
 			t += " [" + pl + "]"
 		}
 	}
-	return t
+	return sanitizeCaptureText(t)
 }
 
 // flagMark returns the one-cell marker for a row. The flag glyph is themeable

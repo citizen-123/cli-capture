@@ -41,7 +41,8 @@ func ProxyEnv(base []string, proxyAddr, caFile string) []string {
 		"https_proxy":         proxyURL,
 		"ALL_PROXY":           proxyURL,
 		"all_proxy":           proxyURL,
-		"NO_PROXY":            "",     // clear so nothing opts out silently
+		"NO_PROXY":            "", // clear so nothing opts out silently
+		"no_proxy":            "",
 		"SSL_CERT_FILE":       caFile, // OpenSSL / curl
 		"CURL_CA_BUNDLE":      caFile,
 		"REQUESTS_CA_BUNDLE":  caFile, // Python requests
@@ -60,6 +61,44 @@ func ProxyEnv(base []string, proxyAddr, caFile string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// ProxyEnvForCredentials applies proxy settings to the target environment. A
+// child running as another account receives only account identity, a known PATH,
+// and terminal/locale settings that preserve interactive behavior; it never
+// inherits the launching account's credentials or process-control variables.
+func ProxyEnvForCredentials(base []string, proxyAddr, caFile string, credentials *UserCredentials) []string {
+	if credentials == nil || credentials.uid == uint32(os.Geteuid()) {
+		return ProxyEnv(base, proxyAddr, caFile)
+	}
+	return ProxyEnv(targetAccountEnv(base, credentials), proxyAddr, caFile)
+}
+
+const targetPath = "/usr/local/bin:/usr/bin:/bin"
+
+func targetAccountEnv(base []string, credentials *UserCredentials) []string {
+	env := []string{
+		"HOME=" + credentials.home,
+		"USER=" + credentials.username,
+		"LOGNAME=" + credentials.username,
+		"PATH=" + targetPath,
+	}
+	for _, key := range []string{"TERM", "COLORTERM", "NO_COLOR", "LANG", "LC_ALL", "LC_CTYPE"} {
+		if value, ok := environmentValue(base, key); ok {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}
+
+func environmentValue(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return strings.TrimPrefix(env[i], prefix), true
+		}
+	}
+	return "", false
 }
 
 // LoginShell returns the argv for the user's interactive shell, used as the
@@ -128,8 +167,28 @@ func StartWithCredentials(argv []string, env []string, credentials *UserCredenti
 	return start(argv, env, credentials)
 }
 
+// StartWithCredentialsAndFiles is StartWithCredentials with additional files
+// inherited by the child as descriptors 3 onward. Callers supply data files
+// read-only; this permits a dropped target to read a root-private CA certificate
+// through /proc/self/fd without directory access to privileged state.
+func StartWithCredentialsAndFiles(
+	argv []string,
+	env []string,
+	credentials *UserCredentials,
+	files []*os.File,
+) (*Target, error) {
+	if credentials == nil {
+		return nil, fmt.Errorf("runner: nil user credentials")
+	}
+	return startWithFiles(argv, env, credentials, files)
+}
+
 func start(argv []string, env []string, credentials *UserCredentials) (*Target, error) {
-	return startWithPTY(argv, env, credentials, pty.Start)
+	return startWithFiles(argv, env, credentials, nil)
+}
+
+func startWithFiles(argv []string, env []string, credentials *UserCredentials, files []*os.File) (*Target, error) {
+	return startWithPTYFiles(argv, env, credentials, files, pty.Start)
 }
 
 func startWithPTY(
@@ -138,7 +197,17 @@ func startWithPTY(
 	credentials *UserCredentials,
 	startPTY func(*exec.Cmd) (*os.File, error),
 ) (*Target, error) {
-	cmd, err := command(argv, env, credentials)
+	return startWithPTYFiles(argv, env, credentials, nil, startPTY)
+}
+
+func startWithPTYFiles(
+	argv []string,
+	env []string,
+	credentials *UserCredentials,
+	files []*os.File,
+	startPTY func(*exec.Cmd) (*os.File, error),
+) (*Target, error) {
+	cmd, err := commandWithFiles(argv, env, credentials, files)
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +224,15 @@ func startWithPTY(
 }
 
 func command(argv []string, env []string, credentials *UserCredentials) (*exec.Cmd, error) {
+	return commandWithFiles(argv, env, credentials, nil)
+}
+
+func commandWithFiles(
+	argv []string,
+	env []string,
+	credentials *UserCredentials,
+	files []*os.File,
+) (*exec.Cmd, error) {
 	if len(argv) == 0 {
 		return nil, fmt.Errorf("runner: empty command")
 	}
@@ -168,6 +246,12 @@ func command(argv []string, env []string, credentials *UserCredentials) (*exec.C
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = env
+	for _, file := range files {
+		if file == nil {
+			return nil, fmt.Errorf("runner: nil inherited file")
+		}
+	}
+	cmd.ExtraFiles = append([]*os.File(nil), files...)
 	if err := configureUserCredentials(cmd, credentials); err != nil {
 		return nil, fmt.Errorf("runner: configure target credentials: %w", err)
 	}

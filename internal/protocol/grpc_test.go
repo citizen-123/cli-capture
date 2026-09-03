@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"io"
 	"testing"
+
+	"github.com/citizen-123/cli-capture/internal/capture"
 )
 
 // frameGRPC builds a gRPC length-prefixed message.
@@ -138,5 +140,61 @@ func TestProtoFieldSummary(t *testing.T) {
 	want := "#1(len) #2(varint)"
 	if got != want {
 		t.Errorf("ProtoFieldSummary = %q, want %q", got, want)
+	}
+}
+
+func TestProtoFieldSummaryRejectsOverflowingLength(t *testing.T) {
+	// field #1, length-delimited, then a uint64 length that cannot fit in the
+	// remaining input and would make the previous int arithmetic overflow.
+	malformed := []byte{0x0A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F}
+	if got := ProtoFieldSummary(malformed); got != "" {
+		t.Fatalf("ProtoFieldSummary(%x) = %q, want empty summary", malformed, got)
+	}
+}
+
+func TestGRPCTamperReaderRejectsInvalidCompressionFlag(t *testing.T) {
+	wire := []byte{2, 0, 0, 0, 0}
+	out, err := io.ReadAll(NewGRPCTamperReader(bytes.NewReader(wire), func(GRPCMessage) ([]byte, bool) {
+		t.Fatal("transform received an invalid frame")
+		return nil, false
+	}))
+	if err == nil {
+		t.Fatal("invalid compression flag was normalized and forwarded")
+	}
+	if len(out) != 0 {
+		t.Fatalf("invalid frame was partially forwarded: %x", out)
+	}
+}
+
+func TestGRPCObserversRejectIncompleteOversizedFrameWithoutRetention(t *testing.T) {
+	wire := []byte{0, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(wire[1:], uint32(capture.MaxFrameBytes+1))
+
+	var observed int
+	var rejected error
+	reader := NewGRPCFramerWithError(bytes.NewReader(wire), func(GRPCMessage) {
+		observed++
+	}, func(err error) {
+		rejected = err
+	})
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("pass-through observer changed stream outcome: %v", err)
+	}
+	if observed != 0 {
+		t.Fatalf("observed %d messages from an incomplete oversized frame", observed)
+	}
+	if rejected == nil {
+		t.Fatal("oversized declared frame was not rejected")
+	}
+
+	out, err := io.ReadAll(NewGRPCTamperReader(bytes.NewReader(wire), func(GRPCMessage) ([]byte, bool) {
+		t.Fatal("transform received an oversized frame")
+		return nil, false
+	}))
+	if err == nil {
+		t.Fatal("tamper reader accepted an incomplete oversized frame")
+	}
+	if len(out) != 0 {
+		t.Fatalf("oversized frame was partially forwarded: %x", out)
 	}
 }

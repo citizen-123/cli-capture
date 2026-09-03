@@ -151,7 +151,7 @@ func statusBar(width int, msg string, reqOn, respOn bool) string {
 		mode = "req:" + onOff(reqOn) + " resp:" + onOff(respOn)
 	}
 	left := statusModeStyle.Render(" " + mode + " ")
-	bar := statusTextStyle.Render(" " + msg)
+	bar := statusTextStyle.Render(" " + sanitizeCaptureText(msg))
 	return lipgloss.NewStyle().Width(width).Render(left + bar)
 }
 

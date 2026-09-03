@@ -65,14 +65,6 @@ homebrew_casks:
       email: citizen-123@users.noreply.github.com
     homepage: "https://github.com/citizen-123/cli-capture"
     description: "Burp Suite, but for CLI/TUI apps — capture, inspect, and tamper with a target program's network traffic"
-    # Unsigned binary: strip the macOS quarantine xattr on install so Gatekeeper
-    # doesn't block the freshly downloaded tool.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/cli-capture"]
-          end
 
 changelog:
   sort: asc

@@ -2,10 +2,14 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 	"github.com/citizen-123/cli-capture/internal/intercept"
@@ -393,5 +397,344 @@ func TestCONNECTAuthorityHostPolicyUsesCanonicalDNSCase(t *testing.T) {
 				t.Errorf("CONNECT authority %q should match the MITM host policy", tt.authority)
 			}
 		})
+	}
+}
+
+type h2FaultBody struct {
+	data     []byte
+	readErr  error
+	closeErr error
+	read     bool
+	closed   bool
+}
+
+func (b *h2FaultBody) Read(p []byte) (int, error) {
+	if b.read {
+		return 0, io.EOF
+	}
+	b.read = true
+	n := copy(p, b.data)
+	if b.readErr != nil {
+		return n, b.readErr
+	}
+	return n, io.EOF
+}
+
+func (b *h2FaultBody) Close() error {
+	b.closed = true
+	return b.closeErr
+}
+
+type h2RoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f h2RoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestH2InterceptRejectsPartialRequestRead(t *testing.T) {
+	readErr := errors.New("request stream reset")
+	body := &h2FaultBody{data: []byte("partial"), readErr: readErr}
+	store := capture.NewStore()
+	engine := intercept.NewEngine()
+	set, err := scope.Build(nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.SetScope(set)
+	engine.SetEnabled(true)
+	cap := &h2Capture{
+		base: h2RoundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("upstream received a partial intercepted request")
+			return nil, nil
+		}),
+		proxy:  &Proxy{store: store, tamper: engine},
+		target: "svc:443",
+		sni:    "svc",
+	}
+	req, _ := http.NewRequest(http.MethodPost, "https://svc/x", nil)
+	req.Body = body
+
+	if _, err := cap.RoundTrip(req); !errors.Is(err, readErr) {
+		t.Fatalf("RoundTrip error = %v, want %v", err, readErr)
+	}
+	if !body.closed {
+		t.Error("failed request body was not closed")
+	}
+	flow := store.List()[0]
+	if flow.Status != capture.StatusError || flow.Response != nil {
+		t.Fatalf("partial request flow = %+v, want terminal request error without response", flow)
+	}
+}
+
+func TestH2InterceptRejectsResponseReadAndCloseErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body *h2FaultBody
+	}{
+		{name: "read error", body: &h2FaultBody{data: []byte("partial"), readErr: errors.New("response reset")}},
+		{name: "close error", body: &h2FaultBody{data: []byte("complete"), closeErr: errors.New("response close failed")}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := capture.NewStore()
+			engine := intercept.NewEngine()
+			set, err := scope.Build(nil, nil, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine.SetScope(set)
+			engine.SetInterceptResponses(true)
+			cap := &h2Capture{
+				base: h2RoundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						Status:     "200 OK",
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       tt.body,
+					}, nil
+				}),
+				proxy:  &Proxy{store: store, tamper: engine},
+				target: "svc:443",
+				sni:    "svc",
+			}
+			req, _ := http.NewRequest(http.MethodGet, "https://svc/x", nil)
+
+			if _, err := cap.RoundTrip(req); err == nil {
+				t.Fatal("partial response was treated as a complete response")
+			}
+			if !tt.body.closed {
+				t.Error("failed response body was not closed")
+			}
+			flow := store.List()[0]
+			if flow.Status != capture.StatusError || flow.Response == nil || flow.Response.Body != nil {
+				t.Fatalf("partial response flow = %+v, want response metadata plus terminal error", flow)
+			}
+		})
+	}
+}
+
+func TestH2OversizedInterceptedRequestStreamsWithoutPartialEdit(t *testing.T) {
+	store := capture.NewStore()
+	engine := intercept.NewEngine()
+	set, err := scope.Build(nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.SetScope(set)
+	engine.SetEnabled(true)
+	engine.OnPause(func(intercept.PauseToken, *capture.Flow, *capture.Message) {
+		t.Fatal("oversized request should not be offered to the editor")
+	})
+	base := &recordRT{respBody: []byte("ok")}
+	cap := &h2Capture{base: base, proxy: &Proxy{store: store, tamper: engine}, target: "svc:443", sni: "svc"}
+	body := bytes.Repeat([]byte{'x'}, capture.MaxRetainedWireBodyBytes+1)
+	req, _ := http.NewRequest(http.MethodPost, "https://svc/x", bytes.NewReader(body))
+
+	resp, err := cap.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(base.gotBody, body) {
+		t.Fatalf("upstream body was changed or truncated: got %d bytes, want %d", len(base.gotBody), len(body))
+	}
+	flow := store.List()[0]
+	if !flow.Request.Truncated || flow.Request.Meta[protocol.BodyRepresentationMeta] != protocol.BodyRepresentationUnavailable {
+		t.Fatalf("oversized request capture = %+v, want truncated unavailable capture", flow.Request)
+	}
+}
+
+func TestH2FixedLengthRequestFinalizesOnCloseAfterExactRead(t *testing.T) {
+	store := capture.NewStore()
+	engine := intercept.NewEngine()
+	const body = "fixed"
+	cap := &h2Capture{
+		base: h2RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			got := make([]byte, len(body))
+			if _, err := io.ReadFull(req.Body, got); err != nil {
+				return nil, err
+			}
+			if err := req.Body.Close(); err != nil {
+				return nil, err
+			}
+			return &http.Response{
+				Status:        "200 OK",
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("")),
+				ContentLength: 0,
+			}, nil
+		}),
+		proxy:  &Proxy{store: store, tamper: engine},
+		target: "svc:443",
+		sni:    "svc",
+	}
+	req, _ := http.NewRequest(http.MethodPost, "https://svc/x", strings.NewReader(body))
+	resp, err := cap.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	flow := store.List()[0]
+	if flow.Status != capture.StatusComplete || flow.Request == nil || string(flow.Request.Raw) != body {
+		t.Fatalf("fixed-length request did not finalize on Close: %+v", flow)
+	}
+}
+
+func TestH2ServerSetsHeaderAndStreamBounds(t *testing.T) {
+	server := newH2Server()
+	if server.MaxConcurrentStreams != uint32(maxConcurrentConnections) {
+		t.Errorf("MaxConcurrentStreams = %d, want %d", server.MaxConcurrentStreams, maxConcurrentConnections)
+	}
+	opts := newH2ServeConnOpts(http.NotFoundHandler())
+	if opts.BaseConfig == nil || opts.BaseConfig.MaxHeaderBytes != capture.MaxRetainedHeaderBytes {
+		t.Errorf("MaxHeaderBytes = %#v, want %d", opts.BaseConfig, capture.MaxRetainedHeaderBytes)
+	}
+}
+
+func TestH2InterceptsBodylessRequest(t *testing.T) {
+	store := capture.NewStore()
+	engine := intercept.NewEngine()
+	set, err := scope.Build(nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.SetScope(set)
+	engine.SetEnabled(true)
+	paused := false
+	engine.OnPause(func(token intercept.PauseToken, _ *capture.Flow, msg *capture.Message) {
+		paused = true
+		if len(msg.Raw) != 0 {
+			t.Errorf("bodyless request editor seed = %q, want empty body", msg.Raw)
+		}
+		engine.Resolve(token, intercept.Resolution{Decision: intercept.Drop})
+	})
+	base := h2RoundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("dropped bodyless request reached upstream")
+		return nil, nil
+	})
+	cap := &h2Capture{base: base, proxy: &Proxy{store: store, tamper: engine}, target: "svc:443", sni: "svc"}
+	req, err := http.NewRequest(http.MethodGet, "https://svc.example/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cap.RoundTrip(req); err == nil || !strings.Contains(err.Error(), "dropped") {
+		t.Fatalf("RoundTrip error = %v, want dropped request", err)
+	}
+	if !paused {
+		t.Fatal("bodyless request was not offered to interception")
+	}
+}
+
+func TestH2CanceledRequestContextReleasesPendingIntercept(t *testing.T) {
+	store := capture.NewStore()
+	engine := intercept.NewEngine()
+	set, err := scope.Build(nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.SetScope(set)
+	engine.SetEnabled(true)
+	paused := make(chan intercept.PauseToken, 1)
+	engine.OnPause(func(token intercept.PauseToken, _ *capture.Flow, _ *capture.Message) {
+		paused <- token
+	})
+	base := h2RoundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("canceled request reached upstream")
+		return nil, nil
+	})
+	cap := &h2Capture{base: base, proxy: &Proxy{store: store, tamper: engine}, target: "svc:443", sni: "svc"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://svc.example/upload", strings.NewReader("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := cap.RoundTrip(req)
+		done <- err
+	}()
+
+	var token intercept.PauseToken
+	select {
+	case token = <-paused:
+	case <-time.After(time.Second):
+		t.Fatal("request did not become pending")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("RoundTrip error = %v, want canceled drop", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled request left an intercept wait pending")
+	}
+	if engine.Resolve(token, intercept.Resolution{Decision: intercept.Forward}) {
+		t.Fatal("canceled pause still accepted a resolution")
+	}
+}
+
+func TestH2GRPCInterceptClearsResponseContentLength(t *testing.T) {
+	store := capture.NewStore()
+	engine := intercept.NewEngine()
+	set, err := scope.Build(nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.SetScope(set)
+	engine.SetInterceptResponses(true)
+	engine.OnPause(func(token intercept.PauseToken, _ *capture.Flow, msg *capture.Message) {
+		if msg.Direction != capture.ServerToClient {
+			t.Fatalf("intercepted direction = %s, want server-to-client", msg.Direction)
+		}
+		engine.Resolve(token, intercept.Resolution{
+			Decision:   intercept.Forward,
+			EditedBody: []byte("a longer gRPC response"),
+		})
+	})
+	original := grpcFrame([]byte("short"))
+	base := h2RoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			Status:        "200 OK",
+			StatusCode:    http.StatusOK,
+			Header:        http.Header{"Content-Type": {"application/grpc"}, "Content-Length": {"10"}},
+			Body:          io.NopCloser(bytes.NewReader(original)),
+			ContentLength: int64(len(original)),
+		}, nil
+	})
+	cap := &h2Capture{base: base, proxy: &Proxy{store: store, tamper: engine}, target: "svc:443", sni: "svc"}
+	req, err := http.NewRequest(http.MethodPost, "https://svc.example/Call", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/grpc")
+	resp, err := cap.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if resp.ContentLength != -1 {
+		t.Errorf("ContentLength = %d, want -1 for transformed gRPC response", resp.ContentLength)
+	}
+	if got := resp.Header.Get("Content-Length"); got != "" {
+		t.Errorf("Content-Length header = %q, want removed", got)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read transformed response: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close transformed response: %v", err)
+	}
+	want := grpcFrame([]byte("a longer gRPC response"))
+	if !bytes.Equal(got, want) {
+		t.Errorf("transformed response = %q, want %q", got, want)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/viewport"
+	"github.com/citizen-123/cli-capture/internal/capture"
 	"github.com/citizen-123/cli-capture/internal/repeater"
 )
 
@@ -46,5 +48,35 @@ func TestRunRepeaterDefersAttackWorkUntilCommandRuns(t *testing.T) {
 	}
 	if got := requests.Load(); got != 0 {
 		t.Fatalf("requests sent before command invocation = %d, want 0", got)
+	}
+}
+
+func TestRepeaterEscapesCapturedTerminalControls(t *testing.T) {
+	unsafe := "\x1b]8;;https://attacker.example\x07"
+	req, payload := newEditor(), newEditor()
+	m := Model{
+		width: 80,
+		rep: repeaterState{
+			base:    &repeater.Template{Method: "GET" + unsafe, URL: "https://api.example/" + unsafe},
+			req:     req,
+			payload: payload,
+			respVP:  viewport.New(80, 3),
+			mode:    repeater.Single,
+			result:  "sent " + unsafe,
+		},
+	}
+	f := capture.NewFlow("c", "api.example:443")
+	f.Response = &capture.Message{Summary: "200 " + unsafe}
+
+	for name, out := range map[string]string{
+		"repeater title and result": m.repeaterView(),
+		"repeater response":         renderRepeaterResponse(f, 80),
+	} {
+		if strings.Contains(out, unsafe) {
+			t.Errorf("%s emitted unsafe capture text %q", name, out)
+		}
+		if !strings.Contains(out, `\x1B]8;;https://attacker.example\x07`) {
+			t.Errorf("%s did not render escaped capture text: %q", name, out)
+		}
 	}
 }

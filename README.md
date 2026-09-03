@@ -116,6 +116,39 @@ install -m755 cli-capture ~/.local/bin/
 cli-capture -version
 ```
 
+### Verify a release archive
+
+Each release archive and `checksums.txt` are subjects of a GitHub build
+provenance attestation. Before extracting an archive, verify its published
+checksum and attest both files with a current
+[GitHub CLI](https://cli.github.com/):
+
+```bash
+# Select the archive for your platform. The archive version omits the tag's `v`.
+TAG=v1.2.3
+ARCHIVE="cli-capture_${TAG#v}_linux_amd64.tar.gz"
+BASE="https://github.com/citizen-123/cli-capture/releases/download/$TAG"
+
+curl -fLO "$BASE/$ARCHIVE"
+curl -fLO "$BASE/checksums.txt"
+sha256sum --ignore-missing --check checksums.txt
+
+for SUBJECT in "$ARCHIVE" checksums.txt; do
+  gh attestation verify "$SUBJECT" \
+    --repo citizen-123/cli-capture \
+    --predicate-type https://slsa.dev/provenance/v1 \
+    --cert-identity-regex '^https://github\.com/citizen-123/cli-capture/\.github/workflows/release\.yml@refs/tags/v.+$' \
+    --cert-oidc-issuer https://token.actions.githubusercontent.com
+done
+```
+
+The checksum command confirms the archive matches the release's published
+digest. The attestation loop confirms that exact archive and the checksum file
+have SLSA provenance from this repository's `release.yml` GitHub Actions
+workflow. Both commands must succeed before using the archive. The macOS
+executable is not Apple-code-signed or notarized; do not remove its quarantine
+attribute to bypass macOS protections.
+
 ### From source
 
 ```bash

@@ -324,3 +324,44 @@ func TestHTTP1HandleOrdinaryFinalResponseIsUnchanged(t *testing.T) {
 }
 
 var _ Tamperer = (*recordingHTTP1Tamper)(nil)
+
+func TestBoundedHTTP1HeadRejectsOversizedStartAndHeaderLines(t *testing.T) {
+	tests := []struct {
+		name string
+		wire string
+	}{
+		{
+			name: "start line",
+			wire: "GET /" + strings.Repeat("x", maxHTTP1StartLineBytes) + " HTTP/1.1\r\n\r\n",
+		},
+		{
+			name: "header section",
+			wire: "GET / HTTP/1.1\r\nX-Test: " + strings.Repeat("x", maxHTTP1HeaderBytes) + "\r\n\r\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := boundedHTTP1Head(bufio.NewReader(strings.NewReader(tc.wire))); err == nil {
+				t.Fatal("boundedHTTP1Head accepted oversized input")
+			}
+		})
+	}
+}
+
+func TestBoundedHTTP1HeadPreservesBufferedPayload(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("GET / HTTP/1.1\r\nHost: test\r\n\r\npayload"))
+	head, err := boundedHTTP1Head(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(head, []byte("\r\n\r\n")) {
+		t.Fatalf("header did not end at section boundary: %q", head)
+	}
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "payload" {
+		t.Fatalf("payload after header = %q, want preserved bytes", body)
+	}
+}

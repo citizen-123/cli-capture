@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
@@ -96,5 +97,34 @@ func TestJobLabel(t *testing.T) {
 	got := jobLabel(map[string]string{"user": "admin", "pass": "x"}, []string{"user", "pass"})
 	if got != "user=admin, pass=x" {
 		t.Errorf("jobLabel = %q", got)
+	}
+}
+
+func TestCapturedTitleIsEscapedAtEveryTrafficSink(t *testing.T) {
+	unsafe := "\x1b]8;;https://attacker.example\x07"
+	f := capture.NewFlow("c", "server:443")
+	f.Request = &capture.Message{Summary: "GET " + unsafe, Meta: map[string]string{}}
+	m := Model{
+		flows:    []*capture.Flow{f},
+		paused:   f,
+		viewFlow: f,
+		fi:       newFilter(),
+		vp:       viewport.New(80, 4),
+	}
+
+	sinks := map[string]string{
+		"row":          m.renderFlowRow(f, false, 80),
+		"pending":      m.renderTraffic(80, 12),
+		"detail title": m.renderDetail(),
+		"editor title": m.renderEditorTitle(),
+		"status":       statusBar(80, f.Title(), false, false),
+	}
+	for name, out := range sinks {
+		if strings.Contains(out, unsafe) {
+			t.Errorf("%s emitted unsafe captured title %q", name, out)
+		}
+		if !strings.Contains(out, `\x1B]8;;https://attacker.example\x07`) {
+			t.Errorf("%s did not render the escaped captured title: %q", name, out)
+		}
 	}
 }

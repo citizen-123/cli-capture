@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"syscall"
 )
@@ -40,6 +41,12 @@ func lookupUserCredentialsWith(
 	if resolvedUID != uint32(uid) {
 		return nil, fmt.Errorf("uid lookup for %s returned uid %s", uidText, u.Uid)
 	}
+	if u.Username == "" {
+		return nil, fmt.Errorf("uid %s has no username", uidText)
+	}
+	if u.HomeDir == "" || !filepath.IsAbs(u.HomeDir) {
+		return nil, fmt.Errorf("uid %s has invalid home directory %q", uidText, u.HomeDir)
+	}
 	gid, err := parseCredentialID("primary gid", u.Gid)
 	if err != nil {
 		return nil, err
@@ -66,7 +73,13 @@ func lookupUserCredentialsWith(
 		seen[groupID] = struct{}{}
 		groups = append(groups, groupID)
 	}
-	return &UserCredentials{uid: resolvedUID, gid: gid, groups: groups}, nil
+	return &UserCredentials{
+		uid:      resolvedUID,
+		gid:      gid,
+		groups:   groups,
+		username: u.Username,
+		home:     filepath.Clean(u.HomeDir),
+	}, nil
 }
 
 func parseCredentialID(kind, value string) (uint32, error) {

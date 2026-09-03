@@ -13,8 +13,9 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// maxDecoded caps a decompressed body so a compression bomb can't exhaust memory.
-const maxDecoded = 64 << 20 // 64 MiB
+// maxDecoded aliases the shared logical-body budget so decompression cannot
+// retain more data than the capture model accepts.
+const maxDecoded = MaxRetainedLogicalBodyBytes
 
 // DecodeContentEncoding decompresses a body per its Content-Encoding header
 // (gzip, deflate, br, zstd). Empty/identity/unknown encodings and any decode
@@ -33,6 +34,9 @@ func DecodeContentEncoding(body []byte, encoding string) []byte {
 // operations, such as replay, that must not mistake wire bytes for logical
 // display bytes.
 func DecodeContentEncodingStrict(body []byte, encoding string) ([]byte, error) {
+	if len(body) > MaxRetainedWireBodyBytes {
+		return nil, fmt.Errorf("wire body exceeds %d bytes", MaxRetainedWireBodyBytes)
+	}
 	encodings, err := contentEncodings(encoding)
 	if err != nil {
 		return nil, err
@@ -86,6 +90,9 @@ func decodeOneContentEncoding(body []byte, encoding string) ([]byte, error) {
 // EncodeContentEncoding converts logical body bytes back to the wire
 // representation named by Content-Encoding.
 func EncodeContentEncoding(body []byte, encoding string) ([]byte, error) {
+	if len(body) > MaxRetainedLogicalBodyBytes {
+		return nil, fmt.Errorf("logical body exceeds %d bytes", MaxRetainedLogicalBodyBytes)
+	}
 	encodings, err := contentEncodings(encoding)
 	if err != nil {
 		return nil, err
@@ -98,6 +105,9 @@ func EncodeContentEncoding(body []byte, encoding string) ([]byte, error) {
 		out, err = encodeOneContentEncoding(out, current)
 		if err != nil {
 			return nil, fmt.Errorf("encode Content-Encoding %q: %w", current, err)
+		}
+		if len(out) > MaxRetainedWireBodyBytes {
+			return nil, fmt.Errorf("encoded body exceeds %d bytes", MaxRetainedWireBodyBytes)
 		}
 	}
 	return out, nil

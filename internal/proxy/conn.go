@@ -24,10 +24,63 @@ func rw(c net.Conn, br *bufio.Reader) *peekConn {
 
 func (p *peekConn) Read(b []byte) (int, error) { return p.br.Read(b) }
 
-const (
-	maxClientHelloPeek     = 128 << 10
-	clientHelloPeekTimeout = 5 * time.Second
-)
+// CloseWrite preserves TCP half-closes through the buffered-read wrapper.
+func (p *peekConn) CloseWrite() error {
+	if conn, ok := p.Conn.(interface{ CloseWrite() error }); ok {
+		return conn.CloseWrite()
+	}
+	return nil
+}
+
+// idleConn refreshes a connection's deadline whenever traffic crosses the
+// proxy. It prevents a relay peer that becomes silent from retaining resources
+// indefinitely while preserving active long-lived connections.
+type idleConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func newIdleConn(conn net.Conn, timeout time.Duration) (*idleConn, error) {
+	c := &idleConn{Conn: conn, timeout: timeout}
+	if err := c.refresh(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *idleConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		if deadlineErr := c.refresh(); deadlineErr != nil && err == nil {
+			err = deadlineErr
+		}
+	}
+	return n, err
+}
+
+func (c *idleConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		if deadlineErr := c.refresh(); deadlineErr != nil && err == nil {
+			err = deadlineErr
+		}
+	}
+	return n, err
+}
+
+// CloseWrite preserves TCP half-closes through the idle-deadline wrapper.
+func (c *idleConn) CloseWrite() error {
+	if conn, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return conn.CloseWrite()
+	}
+	return nil
+}
+
+func (c *idleConn) refresh() error {
+	return c.Conn.SetDeadline(time.Now().Add(c.timeout))
+}
+
+const maxClientHelloPeek = 128 << 10
 
 var (
 	errClientHelloPeekLimit = errors.New("client hello exceeds peek limit")
@@ -48,6 +101,14 @@ func (c *replayConn) Read(p []byte) (int, error) {
 		return n, nil
 	}
 	return c.Conn.Read(p)
+}
+
+// CloseWrite preserves TCP half-closes through the replay wrapper.
+func (c *replayConn) CloseWrite() error {
+	if conn, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return conn.CloseWrite()
+	}
+	return nil
 }
 
 // clientHelloProbe records a bounded prefix and suppresses writes. crypto/tls
@@ -78,7 +139,7 @@ func (*clientHelloProbe) Write(p []byte) (int, error) { return len(p), nil }
 // Every byte read during the byte- and time-bounded probe is replayed to the
 // next consumer.
 func sniffClientHello(conn net.Conn) (serverName string, replay net.Conn, err error) {
-	return sniffClientHelloWithin(conn, clientHelloPeekTimeout)
+	return sniffClientHelloWithin(conn, tlsHandshakeTimeout)
 }
 
 func sniffClientHelloWithin(conn net.Conn, timeout time.Duration) (serverName string, replay net.Conn, err error) {

@@ -35,6 +35,12 @@ func CapturedRequestBody(f *capture.Flow) (RequestBody, error) {
 	if f == nil || f.Request == nil {
 		return RequestBody{}, fmt.Errorf("flow has no captured request body")
 	}
+	if f.Truncated || f.Request.Truncated {
+		return RequestBody{}, fmt.Errorf("captured request body is incomplete")
+	}
+	if len(f.Request.Body) > capture.MaxRetainedLogicalBodyBytes || len(f.Request.Raw) > capture.MaxRetainedMessageBytes {
+		return RequestBody{}, fmt.Errorf("captured request body exceeds retention limit")
+	}
 
 	switch f.Protocol {
 	case capture.ProtoHTTP1:
@@ -87,6 +93,10 @@ func EncodeRequestBody(proto capture.Protocol, header http.Header, body RequestB
 }
 
 func capturedHTTP1Body(message *capture.Message) ([]byte, error) {
+	if message.Truncated {
+		return nil, fmt.Errorf("captured HTTP/1 request body is incomplete")
+	}
+
 	if message.Meta != nil && message.Meta[BodyRepresentationMeta] == BodyRepresentationUnavailable {
 		return nil, fmt.Errorf("captured HTTP/1 request body is unavailable")
 	}
@@ -94,13 +104,17 @@ func capturedHTTP1Body(message *capture.Message) ([]byte, error) {
 		return capturedBodyWithoutRaw(message)
 	}
 
-	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(message.Raw)))
+	req, _, err := readHTTP1Request(bufio.NewReader(bytes.NewReader(message.Raw)))
 	if err != nil {
 		return nil, fmt.Errorf("parse captured HTTP/1 request: %w", err)
 	}
-	wire, err := io.ReadAll(req.Body)
+
+	wire, err := io.ReadAll(io.LimitReader(req.Body, capture.MaxRetainedWireBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read captured HTTP/1 request body: %w", err)
+	}
+	if len(wire) > capture.MaxRetainedWireBodyBytes {
+		return nil, fmt.Errorf("captured HTTP/1 request body exceeds %d-byte limit", capture.MaxRetainedWireBodyBytes)
 	}
 	encoding := requestContentEncoding(req.Header)
 	storedEncoding := requestContentEncoding(messageHeader(message))
@@ -150,6 +164,10 @@ func rawHTTP1Entity(raw []byte) []byte {
 }
 
 func capturedHTTP2Body(message *capture.Message) ([]byte, error) {
+	if message.Truncated {
+		return nil, fmt.Errorf("captured HTTP/2 request body is incomplete")
+	}
+
 	representation := ""
 	if message.Meta != nil {
 		representation = message.Meta[BodyRepresentationMeta]
@@ -249,6 +267,10 @@ func requestContentEncoding(header http.Header) string {
 }
 
 func capturedGRPCBody(f *capture.Flow) (RequestBody, error) {
+	if f.Truncated || f.Request.Truncated {
+		return RequestBody{}, fmt.Errorf("captured gRPC request messages are incomplete")
+	}
+
 	header := messageHeader(f.Request)
 	outerEncoding := requestContentEncoding(header)
 
@@ -265,6 +287,13 @@ func capturedGRPCBody(f *capture.Flow) (RequestBody, error) {
 		if message == nil || message.Direction != capture.ClientToServer {
 			continue
 		}
+		if len(messages) >= capture.MaxMessagesPerFlow {
+			return RequestBody{}, fmt.Errorf("too many captured gRPC messages")
+		}
+		if len(message.Body) > capture.MaxFrameBytes || len(message.Raw) > capture.MaxFrameBytes {
+			return RequestBody{}, fmt.Errorf("captured gRPC message exceeds %d-byte limit", capture.MaxFrameBytes)
+		}
+
 		compressed, err := capturedCompressionFlag(message)
 		if err != nil {
 			return RequestBody{}, err

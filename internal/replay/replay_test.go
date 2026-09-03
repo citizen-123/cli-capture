@@ -433,3 +433,23 @@ func countServerMessages(messages []*capture.Message) int {
 	}
 	return count
 }
+
+func TestResendBoundsOversizedResponseCapture(t *testing.T) {
+	body := bytes.Repeat([]byte{'r'}, capture.MaxRetainedWireBodyBytes+1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	flow, err := Resend(replayResponseTestFlow(strings.TrimPrefix(srv.URL, "http://")))
+	if err != nil {
+		t.Fatalf("Resend: %v", err)
+	}
+	if flow.Response == nil || !flow.Truncated || !flow.Response.Truncated {
+		t.Fatalf("oversized replay response was not marked truncated: %+v", flow)
+	}
+	if got := len(flow.Response.Body); got != capture.MaxRetainedWireBodyBytes {
+		t.Errorf("retained response bytes = %d, want %d", got, capture.MaxRetainedWireBodyBytes)
+	}
+}

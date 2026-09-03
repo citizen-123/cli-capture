@@ -81,3 +81,23 @@ func TestExportsNarrowPreexistingFiles(t *testing.T) {
 		})
 	}
 }
+
+func TestFlowExportsRejectUnsafeImportedID(t *testing.T) {
+	dir := t.TempDir()
+	m, flow := privateExportModel(dir)
+	flow.ID = "../../../../escaped"
+
+	if got := m.exportViewedFlow(); !strings.Contains(got, "invalid flow id") {
+		t.Fatalf("viewed-flow export status = %q, want invalid ID refusal", got)
+	}
+	if got := m.exportCurlSelected(); !strings.Contains(got, "invalid flow id") {
+		t.Fatalf("curl export status = %q, want invalid ID refusal", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read export directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unsafe ID created export files: %v", entries)
+	}
+}

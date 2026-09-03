@@ -23,7 +23,7 @@ var client = &http.Client{Timeout: 30 * time.Second}
 // Resend reconstructs f's request, sends it again, and returns the newly
 // captured flow. The original flow is left untouched.
 func Resend(f *capture.Flow) (*capture.Flow, error) {
-	if f.Request == nil {
+	if f == nil || f.Request == nil {
 		return nil, fmt.Errorf("replay: flow has no request to resend")
 	}
 	switch f.Protocol {
@@ -39,6 +39,9 @@ func Resend(f *capture.Flow) (*capture.Flow, error) {
 	wireBody, err := protocol.EncodeRequestBody(f.Protocol, http.Header(f.Request.Headers), logicalBody)
 	if err != nil {
 		return nil, fmt.Errorf("replay: reconstruct request body: %w", err)
+	}
+	if len(wireBody) > capture.MaxRetainedWireBodyBytes {
+		return nil, fmt.Errorf("replay: request body exceeds %d-byte limit", capture.MaxRetainedWireBodyBytes)
 	}
 
 	scheme := "http"
@@ -79,13 +82,18 @@ func Resend(f *capture.Flow) (*capture.Flow, error) {
 		nf.Err = err
 		return nf, err
 	}
-	body, readErr := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, capture.MaxRetainedWireBodyBytes+1))
 	_ = resp.Body.Close()
 	if readErr != nil {
 		err = fmt.Errorf("replay: read response body: %w", readErr)
 		nf.Status = capture.StatusError
 		nf.Err = err
 		return nf, err
+	}
+	truncated := len(body) > capture.MaxRetainedWireBodyBytes
+	if truncated {
+		body = body[:capture.MaxRetainedWireBodyBytes]
+		nf.Truncated = true
 	}
 	nf.Response = &capture.Message{
 		Direction: capture.ServerToClient,
@@ -94,6 +102,7 @@ func Resend(f *capture.Flow) (*capture.Flow, error) {
 		Headers:   resp.Header,
 		Body:      body,
 		Raw:       body,
+		Truncated: truncated,
 		Meta:      map[string]string{"status": resp.Status},
 	}
 	nf.Status = capture.StatusComplete

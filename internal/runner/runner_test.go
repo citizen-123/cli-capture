@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"os"
 	"reflect"
 	"testing"
 )
@@ -111,5 +112,76 @@ func TestShellCommand(t *testing.T) {
 				t.Errorf("ShellCommand(%q) = %q, want %q", tc.argv, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestProxyEnvForCredentialsDoesNotInheritPrivilegedEnvironment(t *testing.T) {
+	credentials := &UserCredentials{
+		uid:      ^uint32(0),
+		username: "target",
+		home:     "/home/target",
+	}
+	env := ProxyEnvForCredentials([]string{
+		"AWS_SECRET_ACCESS_KEY=launcher-secret",
+		"SSH_AUTH_SOCK=/run/user/0/ssh-agent",
+		"SUDO_COMMAND=cli-capture",
+		"HOME=/root",
+		"PATH=/root/bin",
+		"TERM=xterm-256color",
+		"LANG=en_US.UTF-8",
+	}, "127.0.0.1:8080", "/secure/ca.pem", credentials)
+
+	for _, forbidden := range []string{"AWS_SECRET_ACCESS_KEY", "SSH_AUTH_SOCK", "SUDO_COMMAND"} {
+		if _, ok := environmentValue(env, forbidden); ok {
+			t.Errorf("credentialed target inherited %s", forbidden)
+		}
+	}
+	for key, want := range map[string]string{
+		"HOME":          "/home/target",
+		"USER":          "target",
+		"LOGNAME":       "target",
+		"PATH":          targetPath,
+		"TERM":          "xterm-256color",
+		"LANG":          "en_US.UTF-8",
+		"HTTP_PROXY":    "http://127.0.0.1:8080",
+		"SSL_CERT_FILE": "/secure/ca.pem",
+	} {
+		got, ok := environmentValue(env, key)
+		if !ok || got != want {
+			t.Errorf("%s = %q (present %t), want %q", key, got, ok, want)
+		}
+	}
+}
+
+func TestProxyEnvClearsNoProxyBypasses(t *testing.T) {
+	env := ProxyEnv([]string{
+		"NO_PROXY=localhost,127.0.0.1",
+		"no_proxy=example.com",
+	}, "127.0.0.1:8080", "/secure/ca.pem")
+
+	for _, key := range []string{"NO_PROXY", "no_proxy"} {
+		if got, ok := environmentValue(env, key); !ok || got != "" {
+			t.Errorf("%s = %q (present %t), want an empty override", key, got, ok)
+		}
+	}
+}
+
+func TestCommandWithFilesInheritsCADescriptor(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	caFile, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open CA descriptor: %v", err)
+	}
+	defer caFile.Close()
+
+	cmd, err := commandWithFiles([]string{executable}, nil, nil, []*os.File{caFile})
+	if err != nil {
+		t.Fatalf("prepare target command: %v", err)
+	}
+	if len(cmd.ExtraFiles) != 1 || cmd.ExtraFiles[0] != caFile {
+		t.Fatalf("target inherited files = %v, want CA descriptor", cmd.ExtraFiles)
 	}
 }

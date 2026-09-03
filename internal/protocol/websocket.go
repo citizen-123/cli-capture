@@ -2,11 +2,12 @@ package protocol
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httputil"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,15 @@ func (s *wsSession) writeToServer(b []byte) error {
 // Inject writes a new frame into the live session. Client→server frames are
 // masked (as a real client's are); server→client frames are not.
 func (s *wsSession) Inject(dir capture.Direction, opcode byte, payload []byte) error {
+	if len(payload) > capture.MaxFrameBytes {
+		return fmt.Errorf("WebSocket frame exceeds %d-byte limit", capture.MaxFrameBytes)
+	}
+	if !validWSOpcode(opcode) || opcode == opContinuation {
+		return fmt.Errorf("invalid injectable WebSocket opcode %#x", opcode)
+	}
+	if isWSControl(opcode) && len(payload) > 125 {
+		return fmt.Errorf("oversized injectable WebSocket control frame")
+	}
 	fr := &wsFrame{Fin: true, Opcode: opcode, Payload: payload}
 	if dir == capture.ClientToServer {
 		fr.Masked = true
@@ -85,7 +95,10 @@ func handleWebSocket(
 	touch func(),
 	closeUpgradeConnections func(),
 ) error {
-	f.Protocol = capture.ProtoWebSocket
+	f.Mutate(func() {
+		f.Protocol = capture.ProtoWebSocket
+	})
+	defer cancelPendingPauses(tamper, f)
 	touch()
 
 	// Refuse compression so frames stay plaintext and thus inspectable/editable.
@@ -99,14 +112,18 @@ func handleWebSocket(
 		return err
 	}
 
-	statusLine, err := server.Reader.ReadString('\n')
+	handshake, err := boundedHTTP1Head(server.Reader)
 	if err != nil {
 		return failHTTP1Response(f, err, touch)
 	}
+	statusLine := string(handshake[:bytes.IndexByte(handshake, '\n')+1])
 	if parseStatusCode(statusLine) != http.StatusSwitchingProtocols {
-		return relayWebSocketRejection(f, req, statusLine, server, client, touch)
+		return relayWebSocketRejection(f, req, handshake, server, client, touch)
 	}
-	if err := relaySwitchingProtocols(statusLine, server, client); err != nil {
+	if _, err := client.Write(handshake); err != nil {
+		return failHTTP1Response(f, err, touch)
+	}
+	if err := client.Flush(); err != nil {
 		return failHTTP1Response(f, err, touch)
 	}
 
@@ -117,101 +134,101 @@ func handleWebSocket(
 		defer reg.UnregisterSession(f.ID)
 	}
 
-	done := make(chan struct{}, 2)
+	results := make(chan error, 2)
 	go func() {
-		pumpWS(session, client, f, capture.ClientToServer, tamper, touch)
-		done <- struct{}{}
+		results <- pumpWS(session, client, f, capture.ClientToServer, tamper, touch)
 	}()
 	go func() {
-		pumpWS(session, server, f, capture.ServerToClient, nil, touch)
-		done <- struct{}{}
+		results <- pumpWS(session, server, f, capture.ServerToClient, tamper, touch)
 	}()
-	<-done
+
+	first := <-results
+	cancelPendingPauses(tamper, f)
 	if closeUpgradeConnections != nil {
-		// An upgraded connection ends when either peer closes. Interrupt the
-		// opposite pump so a silent peer cannot keep the Flow active forever.
+		// An upgraded connection ends when either peer closes or its parser
+		// fails. Interrupt the opposite pump so it cannot keep the Flow active
+		// after an invalid frame or an upstream error.
 		closeUpgradeConnections()
 	}
-	<-done
-
-	if f.Status == capture.StatusActive || f.Status == capture.StatusPending {
-		f.Status = capture.StatusComplete
+	second := <-results
+	if first != nil {
+		f.Mutate(func() {
+			f.Status = capture.StatusError
+			f.Err = first
+		})
+		touch()
+		return first
 	}
+	if second != nil && closeUpgradeConnections == nil {
+		f.Mutate(func() {
+			f.Status = capture.StatusError
+			f.Err = second
+		})
+		touch()
+		return second
+	}
+
+	f.Mutate(func() {
+		if f.Status == capture.StatusActive || f.Status == capture.StatusPending {
+			f.Status = capture.StatusComplete
+		}
+	})
 	touch()
 	return nil
 }
 
-// relaySwitchingProtocols copies a successful handshake's status line and
-// headers to the client verbatim, stopping exactly at the blank line so no
-// following frame bytes are consumed into the wrong buffer.
-func relaySwitchingProtocols(statusLine string, server, client *bufio.ReadWriter) error {
-	if _, err := client.Write([]byte(statusLine)); err != nil {
-		return err
-	}
-	for {
-		line, err := server.Reader.ReadString('\n')
-		if err != nil {
-			return err
-		}
-		if _, err := client.Write([]byte(line)); err != nil {
-			return err
-		}
-		if strings.TrimRight(line, "\r\n") == "" {
-			return client.Flush()
-		}
-	}
-}
-
-// relayWebSocketRejection parses and drains a rejected upgrade as a normal HTTP
-// response before exposing any of it to the client. net/http owns all message
-// framing here, including fixed-length, chunked, and close-delimited bodies.
 func relayWebSocketRejection(
 	f *capture.Flow,
 	req *http.Request,
-	statusLine string,
+	handshake []byte,
 	server, client *bufio.ReadWriter,
 	touch func(),
 ) error {
-	responseReader := bufio.NewReader(io.MultiReader(strings.NewReader(statusLine), server.Reader))
+	responseReader := bufio.NewReader(io.MultiReader(bytes.NewReader(handshake), server.Reader))
 	resp, err := http.ReadResponse(responseReader, req)
 	if err != nil {
 		return failHTTP1Response(f, err, touch)
 	}
+	server.Reader = responseReader
 
-	rawResp, err := httputil.DumpResponse(resp, true)
+	rawResp, body, unavailable, err := captureHTTP1Response(resp)
 	if err != nil {
-		_ = resp.Body.Close()
 		return failHTTP1Response(f, err, touch)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		_ = resp.Body.Close()
-		return failHTTP1Response(f, err, touch)
-	}
-	if err := resp.Body.Close(); err != nil {
-		return failHTTP1Response(f, err, touch)
-	}
-
-	decodedBody := capture.DecodeContentEncoding(body, strings.Join(resp.Header.Values("Content-Encoding"), ","))
-	f.Response = &capture.Message{
+	respMsg := &capture.Message{
 		Direction: capture.ServerToClient,
 		Timestamp: time.Now(),
-		Summary:   fmt.Sprintf("%s (%d bytes)", resp.Status, len(decodedBody)),
+		Summary:   fmt.Sprintf("%s (%d bytes)", resp.Status, len(body)),
 		Headers:   resp.Header,
-		Body:      decodedBody,
 		Raw:       rawResp,
 		Meta:      map[string]string{"status": resp.Status},
 	}
+	if unavailable {
+		respMsg.Truncated = true
+		respMsg.Meta[BodyRepresentationMeta] = BodyRepresentationUnavailable
+	} else {
+		respMsg.Body = capture.DecodeContentEncoding(body, strings.Join(resp.Header.Values("Content-Encoding"), ","))
+		respMsg.Summary = fmt.Sprintf("%s (%d bytes)", resp.Status, len(respMsg.Body))
+	}
+	f.Mutate(func() {
+		f.Response = respMsg
+	})
 	touch()
 
-	if _, err := client.Write(rawResp); err != nil {
+	if unavailable {
+		if err := resp.Write(client); err != nil {
+			return failHTTP1Response(f, err, touch)
+		}
+	} else if _, err := client.Write(rawResp); err != nil {
 		return failHTTP1Response(f, err, touch)
 	}
 	if err := client.Flush(); err != nil {
 		return failHTTP1Response(f, err, touch)
 	}
 
-	f.Status = capture.StatusComplete
+	f.Mutate(func() {
+		f.Status = capture.StatusComplete
+	})
 	touch()
 	return nil
 }
@@ -236,7 +253,7 @@ func parseStatusCode(statusLine string) int {
 // tampers client→server data frames, and forwards each frame to the opposite
 // peer through the session's guarded writer. Control frames pass through
 // untouched; a close ends the pump.
-func pumpWS(s *wsSession, src *bufio.ReadWriter, f *capture.Flow, dir capture.Direction, tamper Tamperer, touch func()) {
+func pumpWS(s *wsSession, src *bufio.ReadWriter, f *capture.Flow, dir capture.Direction, tamper Tamperer, touch func()) error {
 	writeOut := s.writeToServer // client→server data goes to the server
 	if dir == capture.ServerToClient {
 		writeOut = s.writeToClient
@@ -244,7 +261,16 @@ func pumpWS(s *wsSession, src *bufio.ReadWriter, f *capture.Flow, dir capture.Di
 	for {
 		fr, err := readWSFrame(src.Reader)
 		if err != nil {
-			return
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if dir == capture.ClientToServer && !fr.Masked {
+			return fmt.Errorf("unmasked client WebSocket frame")
+		}
+		if dir == capture.ServerToClient && fr.Masked {
+			return fmt.Errorf("masked server WebSocket frame")
 		}
 		if isWSData(fr.Opcode) {
 			msg := &capture.Message{
@@ -257,22 +283,31 @@ func pumpWS(s *wsSession, src *bufio.ReadWriter, f *capture.Flow, dir capture.Di
 			}
 			f.AddMessage(msg)
 			if tamper != nil {
-				out, drop := tamper.BeforeForward(f, msg)
+				var out []byte
+				var drop bool
+				if dir == capture.ClientToServer {
+					out, drop = tamper.BeforeForward(f, msg)
+				} else {
+					out, drop = tamper.BeforeDeliver(f, msg)
+				}
 				if drop {
 					touch()
 					continue // skip this frame entirely
 				}
 				if out != nil {
+					if len(out) > capture.MaxFrameBytes {
+						return fmt.Errorf("edited WebSocket frame exceeds %d-byte limit", capture.MaxFrameBytes)
+					}
 					fr.Payload = out
 				}
 			}
 			touch()
 		}
 		if err := writeOut(fr.encode()); err != nil {
-			return
+			return err
 		}
 		if fr.Opcode == opClose {
-			return
+			return nil
 		}
 	}
 }

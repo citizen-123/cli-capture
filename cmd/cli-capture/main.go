@@ -26,6 +26,7 @@ import (
 	"github.com/citizen-123/cli-capture/internal/capture"
 	"github.com/citizen-123/cli-capture/internal/config"
 	"github.com/citizen-123/cli-capture/internal/intercept"
+	"github.com/citizen-123/cli-capture/internal/ownerfile"
 	"github.com/citizen-123/cli-capture/internal/proxy"
 	"github.com/citizen-123/cli-capture/internal/proxy/ca"
 	"github.com/citizen-123/cli-capture/internal/runner"
@@ -94,6 +95,10 @@ func run() error {
 		return nil
 	}
 
+	if err := validateListenerAddresses(*listen, *transparentAddr); err != nil {
+		return err
+	}
+
 	argv := flag.Args()
 	// Whether the user named a target decides which remedy an unresolvable argv
 	// gets later: a named target may be an alias, a derived one means $SHELL is
@@ -108,11 +113,33 @@ func run() error {
 		argv = runner.ShellCommand(argv)
 	}
 
+	var (
+		secureState *ownerfile.StateDir
+		stateDir    = *confDir
+		err         error
+	)
+	if *transparentAddr != "" && *transparentApply {
+		if os.Geteuid() != 0 {
+			return fmt.Errorf("transparent: applying rules needs root (CAP_NET_ADMIN)")
+		}
+		secureState, err = ownerfile.OpenRootStateDir(*confDir)
+		if err != nil {
+			return fmt.Errorf("secure transparent state directory: %w", err)
+		}
+		defer secureState.Close()
+		stateDir = secureState.Path()
+	}
+
 	// Establish the private diagnostics destination before configuration emits
 	// anything. fatal writes directly to stderr, so failures opening this file
 	// and later startup validation errors remain visible to the operator.
-	logPath := filepath.Join(*confDir, "cli-capture.log")
-	logf, err := openStartupLog(*confDir)
+	logPath := filepath.Join(stateDir, "cli-capture.log")
+	var logf *os.File
+	if secureState != nil {
+		logf, err = openPrivilegedStartupLog(secureState)
+	} else {
+		logf, err = openStartupLog(stateDir)
+	}
 	if err != nil {
 		return fmt.Errorf("open log %s: %v", logPath, err)
 	}
@@ -121,7 +148,7 @@ func run() error {
 
 	// User configuration: theme and keymap. Loaded before anything renders, and
 	// fatal on error — a config that half-applied would be worse than a refusal.
-	cfg, err := config.Load(configs, *confDir)
+	cfg, err := config.Load(configs, stateDir)
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
@@ -151,11 +178,27 @@ func run() error {
 	}
 	log.Printf("keys: leader %s", keys.LeaderName)
 
-	authority, err := ca.LoadOrCreate(*confDir)
+	var authority *ca.CA
+	if secureState != nil {
+		authority, err = ca.LoadOrCreateSecure(secureState)
+	} else {
+		authority, err = ca.LoadOrCreate(stateDir)
+	}
 	if err != nil {
 		return fmt.Errorf("ca: %v", err)
 	}
-	caFile := filepath.Join(*confDir, "ca.pem")
+	caFile := filepath.Join(stateDir, "ca.pem")
+	var caDescriptor *os.File
+	if secureState != nil {
+		caDescriptor, err = secureState.OpenFile("ca.pem", os.O_RDONLY, 0)
+		if err != nil {
+			return fmt.Errorf("open CA for target: %w", err)
+		}
+		defer caDescriptor.Close()
+		// ExtraFiles start at descriptor 3. The target retains only this public
+		// certificate descriptor, not access to root's state directory or key.
+		caFile = "/proc/self/fd/3"
+	}
 
 	store := capture.NewStore()
 	if *loadPath != "" {
@@ -233,19 +276,16 @@ func run() error {
 
 			_, portStr, _ := net.SplitHostPort(tl.Addr())
 			port, _ := strconv.Atoi(portStr)
-			teardown, backend, err := transparent.ApplyRedirect(port, *transparentUID)
+			ruleState, backend, err := applyTransparentRedirect(func() (func() error, string, error) {
+				return transparent.ApplyRedirect(port, *transparentUID)
+			})
+			lifecycle.teardown = ruleState.teardown
+			lifecycle.signals = ruleState.signals
+			lifecycle.stopSignals = ruleState.stopSignals
 			if err != nil {
 				return lifecycle, fmt.Errorf("transparent apply: %v", err)
 			}
-			lifecycle.teardown = func() { _ = teardown() }
 			log.Printf("transparent: applied via %s", backend)
-
-			// Route termination through run's return boundary so every resource
-			// unwinds in LIFO order before main preserves the signal exit status.
-			ch := make(chan os.Signal, 1)
-			signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
-			lifecycle.signals = ch
-			lifecycle.stopSignals = func() { signal.Stop(ch) }
 			log.Printf("transparent: nftables redirect applied (uid %d → %s)", *transparentUID, tl.Addr())
 			return lifecycle, nil
 		},
@@ -253,8 +293,12 @@ func run() error {
 			// Log the resolved argv: with a bare launch or -shell it is derived
 			// rather than typed, so the log records what actually ran.
 			log.Printf("target: %s", strings.Join(argv, " "))
-			env := runner.ProxyEnv(os.Environ(), px.Addr(), caFile)
-			target, err = startTarget(argv, env, targetCredentials, runner.Start, runner.StartWithCredentials)
+			env := runner.ProxyEnvForCredentials(os.Environ(), px.Addr(), caFile, targetCredentials)
+			if caDescriptor != nil {
+				target, err = runner.StartWithCredentialsAndFiles(argv, env, targetCredentials, []*os.File{caDescriptor})
+			} else {
+				target, err = startTarget(argv, env, targetCredentials, runner.Start, runner.StartWithCredentials)
+			}
 			if err == nil {
 				return nil
 			}
@@ -279,7 +323,7 @@ func run() error {
 			go pumpPTY(target, screen, ptyCh)
 
 			feeds := tui.Feeds{Events: store.Subscribe(), Pty: ptyCh, Pause: pauseCh}
-			model := tui.New(store, engine, target, screen, feeds, filepath.Join(*confDir, "session.json")).WithKeys(keys)
+			model := tui.New(store, engine, target, screen, feeds, filepath.Join(stateDir, "session.json")).WithKeys(keys)
 			prog = tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 			go func() {
 				_ = target.Wait()
@@ -322,6 +366,43 @@ type transparentLifecycle struct {
 	stopSignals   func()
 }
 
+// validateListenerAddresses rejects unsafe listener addresses before startup
+// creates any state or opens a socket.
+func validateListenerAddresses(proxyAddr, transparentAddr string) error {
+	if err := proxy.ValidateListenAddress(proxyAddr); err != nil {
+		return fmt.Errorf("proxy listen: %w", err)
+	}
+	if transparentAddr == "" {
+		return nil
+	}
+	if err := transparent.ValidateListenAddress(transparentAddr); err != nil {
+		return fmt.Errorf("transparent listen: %w", err)
+	}
+	return nil
+}
+
+// applyTransparentRedirect starts signal delivery before the first firewall
+// command. A SIGTERM received while rules are being installed is retained until
+// runProgram exits through executeCapture's teardown boundary.
+func applyTransparentRedirect(apply func() (func() error, string, error)) (transparentLifecycle, string, error) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	lifecycle := transparentLifecycle{
+		signals:     signals,
+		stopSignals: func() { signal.Stop(signals) },
+	}
+
+	teardown, backend, err := apply()
+	if err != nil {
+		return lifecycle, backend, err
+	}
+	if teardown == nil {
+		return lifecycle, backend, errors.New("transparent: rule application returned no teardown")
+	}
+	lifecycle.teardown = func() { _ = teardown() }
+	return lifecycle, backend, nil
+}
+
 func executeCapture(lifecycle captureLifecycle) error {
 	if err := lifecycle.startProxy(); err != nil {
 		return err
@@ -329,14 +410,17 @@ func executeCapture(lifecycle captureLifecycle) error {
 	defer lifecycle.closeProxy()
 
 	transparentState, err := lifecycle.startTransparent()
-	if transparentState.closeListener != nil {
-		defer transparentState.closeListener()
+	// Keep signal delivery active until listener closure and firewall teardown
+	// finish, so a second SIGTERM cannot terminate the process with rules left
+	// installed.
+	if transparentState.stopSignals != nil {
+		defer transparentState.stopSignals()
 	}
 	if transparentState.teardown != nil {
 		defer transparentState.teardown()
 	}
-	if transparentState.stopSignals != nil {
-		defer transparentState.stopSignals()
+	if transparentState.closeListener != nil {
+		defer transparentState.closeListener()
 	}
 	if err != nil {
 		return err
@@ -483,7 +567,7 @@ func startTarget(
 	return start(argv, env)
 }
 
-// logTransparentSetup records the nftables commands the user must run (as root)
+// logTransparentSetup records the firewall commands the user must run (as root)
 // to redirect their target's traffic into the transparent listener. It goes to
 // the log file because the TUI owns the screen; the privileged setup is
 // inherently a separate, out-of-band step.
@@ -491,10 +575,38 @@ func logTransparentSetup(tl *transparent.Listener, uid int) {
 	_, portStr, _ := net.SplitHostPort(tl.Addr())
 	port, _ := strconv.Atoi(portStr)
 
+	namespace, err := transparent.NewRuleNamespace()
+	if err != nil {
+		log.Printf("transparent: cannot generate isolated firewall rules: %v", err)
+		return
+	}
+
+	type ruleCommands struct {
+		bin      string
+		redirect [][]string
+		flush    [][]string
+	}
 	// Show commands for whichever backend is available, defaulting to nft.
-	bin, redirect, flush := "nft", transparent.NFTRedirect(port, uid), transparent.NFTFlush()
+	bin := "nft"
+	commands := []ruleCommands{{
+		bin:      bin,
+		redirect: transparent.NFTRedirect(namespace, port, uid),
+		flush:    transparent.NFTFlush(namespace),
+	}}
 	if be, err := transparent.DetectBackend(); err == nil {
-		bin, redirect, flush = be.Bin, be.Redirect(port, uid), be.Flush()
+		bin = be.Bin
+		commands = []ruleCommands{{
+			bin:      be.Bin,
+			redirect: be.Redirect(namespace, port, uid),
+			flush:    be.Flush(namespace),
+		}}
+		if be.IPv6Bin != "" {
+			commands = append(commands, ruleCommands{
+				bin:      be.IPv6Bin,
+				redirect: be.IPv6Redirect(namespace, port, uid),
+				flush:    be.IPv6Flush(namespace),
+			})
+		}
 	}
 
 	log.Printf("transparent: listening on %s (needs root + %s to redirect)", tl.Addr(), bin)
@@ -503,10 +615,16 @@ func logTransparentSetup(tl *transparent.Listener, uid int) {
 	} else {
 		log.Printf("transparent: as root, redirect uid %d with:", uid)
 	}
-	for _, c := range transparent.Shell(bin, redirect) {
-		log.Printf("  %s", c)
+	for _, command := range commands {
+		for _, line := range transparent.Shell(command.bin, command.redirect) {
+			log.Printf("  %s", line)
+		}
 	}
-	log.Printf("transparent: teardown: %s", strings.Join(transparent.Shell(bin, flush), " && "))
+	var teardown []string
+	for index := len(commands) - 1; index >= 0; index-- {
+		teardown = append(teardown, transparent.Shell(commands[index].bin, commands[index].flush)...)
+	}
+	log.Printf("transparent: teardown: %s", strings.Join(teardown, " && "))
 }
 
 func defaultDir() string {
@@ -539,6 +657,12 @@ func openStartupLog(dir string) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// openPrivilegedStartupLog appends diagnostics through the verified state
+// directory descriptor so a pre-existing symlink cannot redirect root output.
+func openPrivilegedStartupLog(dir *ownerfile.StateDir) (*os.File, error) {
+	return dir.AppendFile("cli-capture.log", 0o600)
 }
 
 func fatal(format string, a ...any) {
