@@ -35,7 +35,7 @@ const (
 
 // Paused is the notification that one message is held awaiting a decision. Its
 // token resolves this exact pause even when the flow has another paused message;
-// Msg.Raw seeds the editor.
+// Flow and Msg are detached snapshots, and Msg.Raw seeds the editor.
 type Paused struct {
 	Token intercept.PauseToken
 	Flow  *capture.Flow
@@ -200,9 +200,15 @@ func (m *Model) toggleSelectedFlag() string {
 	if f == nil {
 		return "nothing selected to flag"
 	}
-	f.Flagged = !f.Flagged
+	flagged := !f.Flagged
+	if m.store != nil {
+		if !m.store.SetFlagged(f.ID, flagged) {
+			return "flow is no longer available"
+		}
+	}
+	f.Flagged = flagged
 	m.selected = clampIndex(m.selected, len(m.visible()))
-	if f.Flagged {
+	if flagged {
 		return "flagged " + f.Title()
 	}
 	return "unflagged " + f.Title()
@@ -244,7 +250,10 @@ func (m Model) exportViewedFlow() string {
 	if m.viewFlow == nil {
 		return "no flow in view"
 	}
-	path := filepath.Join(filepath.Dir(m.sessionPath), "flow-"+m.viewFlow.ID+".txt")
+	path, err := flowExportPath(m.sessionPath, m.viewFlow.ID, ".txt")
+	if err != nil {
+		return "export: " + err.Error()
+	}
 	if err := ownerfile.Write(path, []byte(export.FlowText(m.viewFlow))); err != nil {
 		return "export: " + err.Error()
 	}
@@ -269,7 +278,6 @@ func (m Model) exportFlagged() string {
 	return fmt.Sprintf("wrote %d flagged flows to %s", len(flagged), path)
 }
 
-// exportCurlSelected writes the selected flow's request as a curl command file.
 func (m Model) exportCurlSelected() string {
 	f := m.selectedFlow()
 	if f == nil {
@@ -279,11 +287,21 @@ func (m Model) exportCurlSelected() string {
 	if err != nil {
 		return "curl: " + err.Error()
 	}
-	path := filepath.Join(filepath.Dir(m.sessionPath), "flow-"+f.ID+".curl")
+	path, err := flowExportPath(m.sessionPath, f.ID, ".curl")
+	if err != nil {
+		return "curl: " + err.Error()
+	}
 	if err := ownerfile.Write(path, []byte(cmd+"\n")); err != nil {
 		return "curl: " + err.Error()
 	}
 	return "wrote curl to " + path
+}
+
+func flowExportPath(sessionPath, id, extension string) (string, error) {
+	if !capture.ValidFlowID(id) {
+		return "", fmt.Errorf("refusing invalid flow id")
+	}
+	return filepath.Join(filepath.Dir(sessionPath), "flow-"+id+extension), nil
 }
 
 // --- messages ---
@@ -324,7 +342,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case eventMsg:
 		m.flows = m.store.List()
 		if m.viewing && m.viewFlow != nil {
-			// Keep the detail view live as a streaming flow accrues messages.
+			// Store snapshots are immutable; replace the detail snapshot by ID so
+			// a streaming flow remains live without sharing proxy-owned state.
+			for _, flow := range m.flows {
+				if flow.ID == m.viewFlow.ID {
+					m.viewFlow = flow
+					break
+				}
+			}
 			m.vp.SetContent(wrapDetail(m.viewFlow, m.vp.Width))
 		}
 		return m, waitEvent(m.feeds.Events)
@@ -778,7 +803,7 @@ func (m Model) onEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) enterEdit() {
 	seed := ""
 	if m.pausedMsg != nil {
-		seed = string(m.pausedMsg.Raw)
+		seed = sanitizeCaptureMultilineText(string(m.pausedMsg.Raw))
 	}
 	m.ta.SetValue(seed)
 	m.sizeEditor()
@@ -996,7 +1021,7 @@ func (m Model) renderTraffic(w, h int) string {
 	}
 
 	if m.paused != nil {
-		b.WriteString("\n" + pendingStyle.Render(glyphPointer+" "+m.paused.Title()))
+		b.WriteString("\n" + pendingStyle.Render(glyphPointer+" "+sanitizeCaptureText(m.paused.Title())))
 		b.WriteString("\n[e]dit  [f]orward  [d]rop")
 	}
 	return b.String()
@@ -1019,7 +1044,7 @@ func clampIndex(i, n int) int {
 func (m Model) renderDetail() string {
 	title := "Detail"
 	if m.viewFlow != nil {
-		title = "Detail " + glyphArrow + " " + m.viewFlow.Title()
+		title = "Detail " + glyphArrow + " " + sanitizeCaptureText(m.viewFlow.Title())
 	}
 	return titleStyle.Render(truncate(title, m.vp.Width)) + "\n" + m.vp.View() + "\n" + "[esc] back · j/k scroll · s save to txt"
 }
@@ -1029,7 +1054,7 @@ func (m Model) renderEditorTitle() string {
 		return "Inject WS frame (" + m.injectDir.String() + ")"
 	}
 	if m.paused != nil {
-		return "Edit " + glyphPointer + " " + m.paused.Title()
+		return "Edit " + glyphPointer + " " + sanitizeCaptureText(m.paused.Title())
 	}
 	return "Edit request"
 }

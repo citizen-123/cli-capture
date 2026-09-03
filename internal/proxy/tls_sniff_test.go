@@ -229,6 +229,90 @@ func TestTransparentTLSPassthroughReceivesOriginalClientHello(t *testing.T) {
 	}
 }
 
+func TestTransparentRawTCPForwardsShortGreetingPromptly(t *testing.T) {
+	const timeout = time.Second
+	greeting := []byte{0x01, 0x02, 0x03}
+	reply := []byte{0x04, 0x05}
+
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer upstream.Close()
+
+	received := make(chan []byte, 1)
+	upstreamErr := make(chan error, 1)
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			upstreamErr <- err
+			return
+		}
+		defer conn.Close()
+
+		got := make([]byte, len(greeting))
+		if _, err := io.ReadFull(conn, got); err != nil {
+			upstreamErr <- err
+			return
+		}
+		if _, err := conn.Write(reply); err != nil {
+			upstreamErr <- err
+			return
+		}
+		received <- got
+	}()
+
+	authority, err := ca.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatalf("create CA: %v", err)
+	}
+	store := capture.NewStore()
+	px := New(store, authority, intercept.NewEngine())
+
+	client, proxySide := net.Pipe()
+	defer client.Close()
+	handlerDone := make(chan struct{})
+	go func() {
+		px.HandleTransparent(proxySide, upstream.Addr().String())
+		close(handlerDone)
+	}()
+
+	if err := client.SetDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("set client deadline: %v", err)
+	}
+	if _, err := client.Write(greeting); err != nil {
+		t.Fatalf("write greeting: %v", err)
+	}
+	gotReply := make([]byte, len(reply))
+	if _, err := io.ReadFull(client, gotReply); err != nil {
+		t.Fatalf("read upstream reply: %v", err)
+	}
+	if !bytes.Equal(gotReply, reply) {
+		t.Fatalf("reply = %x, want %x", gotReply, reply)
+	}
+	select {
+	case got := <-received:
+		if !bytes.Equal(got, greeting) {
+			t.Fatalf("upstream greeting = %x, want %x", got, greeting)
+		}
+	case err := <-upstreamErr:
+		t.Fatalf("upstream: %v", err)
+	case <-time.After(timeout):
+		t.Fatal("upstream did not receive short greeting")
+	}
+
+	_ = client.Close()
+	select {
+	case <-handlerDone:
+	case <-time.After(timeout):
+		t.Fatal("transparent raw handler did not stop")
+	}
+	flows := store.List()
+	if len(flows) != 1 || flows[0].Protocol != capture.ProtoRawTCP {
+		t.Fatalf("transparent flow = %+v, want one raw TCP flow", flows)
+	}
+}
+
 func transparentHandshake(t *testing.T, serverName string, policy func(targetHost string) *scope.Set) tls.ConnectionState {
 	t.Helper()
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -38,6 +38,128 @@ func inScopeFlow(host string) *capture.Flow {
 	return f
 }
 
+func TestPauseNotificationUsesIndependentSnapshots(t *testing.T) {
+	e := NewEngine()
+	set, err := scope.Build(nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetScope(set)
+	e.SetEnabled(true)
+
+	flow := inScopeFlow("api.example")
+	msg := &capture.Message{
+		Direction: capture.ClientToServer,
+		Headers:   map[string][]string{"X-Test": {"before"}},
+		Raw:       []byte("before"),
+	}
+	flow.Request = msg
+	type notice struct {
+		token PauseToken
+		flow  *capture.Flow
+		msg   *capture.Message
+	}
+	paused := make(chan notice, 1)
+	e.OnPause(func(token PauseToken, gotFlow *capture.Flow, gotMsg *capture.Message) {
+		paused <- notice{token: token, flow: gotFlow, msg: gotMsg}
+	})
+	done := make(chan struct{})
+	go func() {
+		e.BeforeForward(flow, msg)
+		close(done)
+	}()
+
+	var got notice
+	select {
+	case got = <-paused:
+	case <-time.After(time.Second):
+		t.Fatal("message did not pause")
+	}
+	if got.flow == flow || got.msg == msg {
+		t.Fatal("pause notification received a live capture object")
+	}
+	flow.Mutate(func() {
+		flow.SNI = "after.example"
+		msg.Headers["X-Test"][0] = "after"
+		msg.Raw[0] = 'A'
+	})
+	if got.flow.SNI == flow.SNI {
+		t.Fatal("pause flow snapshot changed with live flow")
+	}
+	if got.msg.Headers["X-Test"][0] != "before" || string(got.msg.Raw) != "before" {
+		t.Fatalf("pause message snapshot changed: %+v", got.msg)
+	}
+	if !e.Resolve(got.token, Resolution{Decision: Forward}) {
+		t.Fatal("snapshot pause could not be resolved")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("resolved pause did not return")
+	}
+}
+
+func TestPausePublishesStatusSnapshotsToStore(t *testing.T) {
+	store := capture.NewStore()
+	e := NewEngine()
+	e.SetStore(store)
+	set, err := scope.Build(nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetScope(set)
+	e.SetEnabled(true)
+
+	flow := inScopeFlow("api.example")
+	store.Add(flow)
+	events := store.Subscribe()
+	paused := make(chan PauseToken, 1)
+	e.OnPause(func(token PauseToken, _ *capture.Flow, _ *capture.Message) {
+		paused <- token
+	})
+	done := make(chan struct{})
+	go func() {
+		e.BeforeForward(flow, flow.Request)
+		close(done)
+	}()
+
+	var token PauseToken
+	select {
+	case token = <-paused:
+	case <-time.After(time.Second):
+		t.Fatal("flow did not pause")
+	}
+	select {
+	case event := <-events:
+		if event.Kind != capture.FlowUpdated || event.Flow == flow || event.Flow.Status != capture.StatusPending {
+			t.Fatalf("pause event = %+v, want independent pending update", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending state was not published")
+	}
+	pending, ok := store.Get(flow.ID)
+	if !ok || pending == flow || pending.Status != capture.StatusPending {
+		t.Fatalf("stored pending flow = %+v, want independent pending snapshot", pending)
+	}
+
+	if !e.Resolve(token, Resolution{Decision: Forward}) {
+		t.Fatal("pause token was rejected")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pause did not resolve")
+	}
+	select {
+	case event := <-events:
+		if event.Kind != capture.FlowUpdated || event.Flow == flow || event.Flow.Status != capture.StatusActive {
+			t.Fatalf("resume event = %+v, want independent active update", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active state was not published")
+	}
+}
+
 func TestTargetFromFlowHostPolicyUsesCanonicalDNSCase(t *testing.T) {
 	policy, err := scope.Build([]string{
 		"=login.bank.example",
@@ -297,8 +419,11 @@ func TestConcurrentSameFlowPausesResolveByUniqueToken(t *testing.T) {
 	}()
 	responsePause := awaitPause("response")
 
-	if requestPause.msg != request || responsePause.msg != response {
-		t.Fatal("pause notifications did not retain their matching messages")
+	if requestPause.msg == request || responsePause.msg == response {
+		t.Fatal("pause notifications exposed live messages")
+	}
+	if string(requestPause.msg.Raw) != "request" || string(responsePause.msg.Raw) != "response" {
+		t.Fatal("pause snapshots did not retain their matching messages")
 	}
 	if requestPause.token == 0 || responsePause.token == 0 {
 		t.Fatal("engine issued the reserved zero pause token")
@@ -350,6 +475,93 @@ func TestConcurrentSameFlowPausesResolveByUniqueToken(t *testing.T) {
 	}
 	if flow.Status != capture.StatusActive {
 		t.Fatalf("flow status after both resolutions = %s, want active", flow.Status)
+	}
+}
+
+func TestResolvingLastPauseDoesNotUndoTerminalFlowStatus(t *testing.T) {
+	store := capture.NewStore()
+	e := NewEngine()
+	e.SetStore(store)
+	set, err := scope.Build(nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetScope(set)
+	e.SetEnabled(true)
+
+	paused := make(chan PauseToken, 1)
+	e.OnPause(func(token PauseToken, _ *capture.Flow, _ *capture.Message) { paused <- token })
+	flow := inScopeFlow("api.github.com")
+	store.Add(flow)
+	done := make(chan struct{})
+	go func() {
+		e.BeforeForward(flow, &capture.Message{})
+		close(done)
+	}()
+
+	var token PauseToken
+	select {
+	case token = <-paused:
+	case <-time.After(time.Second):
+		t.Fatal("flow did not pause")
+	}
+	flow.Mutate(func() { flow.Status = capture.StatusComplete }) // terminal sibling direction won first
+	if !e.Resolve(token, Resolution{Decision: Forward}) {
+		t.Fatal("pause token was rejected")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pause did not resolve")
+	}
+	if flow.Status != capture.StatusComplete {
+		t.Fatalf("terminal status became %v, want complete", flow.Status)
+	}
+	stored, ok := store.Get(flow.ID)
+	if !ok || stored.Status != capture.StatusComplete {
+		t.Fatalf("stored terminal status = %+v, want complete", stored)
+	}
+}
+
+func TestCancelFlowReleasesEveryPendingPauseAsDrop(t *testing.T) {
+	e := NewEngine()
+	set, err := scope.Build(nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetScope(set)
+	e.SetEnabled(true)
+
+	paused := make(chan PauseToken, 2)
+	e.OnPause(func(token PauseToken, _ *capture.Flow, _ *capture.Message) { paused <- token })
+	flow := inScopeFlow("api.github.com")
+	done := make(chan bool, 2)
+	for range 2 {
+		go func() {
+			_, drop := e.BeforeForward(flow, &capture.Message{})
+			done <- drop
+		}()
+	}
+	for range 2 {
+		select {
+		case <-paused:
+		case <-time.After(time.Second):
+			t.Fatal("flow did not pause")
+		}
+	}
+	e.CancelFlow(flow)
+	for range 2 {
+		select {
+		case drop := <-done:
+			if !drop {
+				t.Fatal("cancelled pause forwarded data")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("cancelled pause remained blocked")
+		}
+	}
+	if e.Resolve(1, Resolution{Decision: Forward}) {
+		t.Fatal("cancelled pause token remained resolvable")
 	}
 }
 

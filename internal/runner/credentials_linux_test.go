@@ -18,7 +18,7 @@ func TestLookupUserCredentialsResolvesPrimaryAndSupplementaryGroups(t *testing.T
 		if id != "1500" {
 			t.Fatalf("lookup id = %q, want 1500", id)
 		}
-		return &user.User{Uid: "1500", Gid: "1600", Username: "target"}, nil
+		return &user.User{Uid: "1500", Gid: "1600", Username: "target", HomeDir: "/home/target"}, nil
 	}
 	groups := func(*user.User) ([]string, error) {
 		return []string{"1700", "1600", "1800", "1700"}, nil
@@ -33,6 +33,9 @@ func TestLookupUserCredentialsResolvesPrimaryAndSupplementaryGroups(t *testing.T
 	}
 	if want := []uint32{1600, 1700, 1800}; !reflect.DeepEqual(got.groups, want) {
 		t.Fatalf("credentials groups = %v, want %v", got.groups, want)
+	}
+	if got.username != "target" || got.home != "/home/target" {
+		t.Fatalf("credentials account identity = %q %q, want target /home/target", got.username, got.home)
 	}
 }
 
@@ -61,7 +64,7 @@ func TestLookupUserCredentialsRejectsInvalidGroupAndLookupFailures(t *testing.T)
 	}
 
 	_, err := lookupUserCredentialsWith(1500, func(string) (*user.User, error) {
-		return &user.User{Uid: "1500", Gid: "1600"}, nil
+		return &user.User{Uid: "1500", Gid: "1600", Username: "target", HomeDir: "/home/target"}, nil
 	}, func(*user.User) ([]string, error) {
 		return []string{"4294967296"}, nil
 	})

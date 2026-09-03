@@ -206,8 +206,11 @@ func TestPauseQueueResolvesConcurrentSameFlowPausesOutOfOrder(t *testing.T) {
 		t.Fatal("response did not pause")
 	}
 
-	if requestPause.Flow != flow || responsePause.Flow != flow {
-		t.Fatal("same-flow pause notifications did not retain the shared flow")
+	if requestPause.Flow == flow || responsePause.Flow == flow || requestPause.Msg == request || responsePause.Msg == response {
+		t.Fatal("pause notifications exposed live capture objects")
+	}
+	if requestPause.Flow.ID != flow.ID || responsePause.Flow.ID != flow.ID {
+		t.Fatal("same-flow pause snapshots lost their flow identity")
 	}
 	if requestPause.Token == responsePause.Token {
 		t.Fatalf("same-flow pauses shared token %d", requestPause.Token)
@@ -217,13 +220,13 @@ func TestPauseQueueResolvesConcurrentSameFlowPausesOutOfOrder(t *testing.T) {
 	// first even though the request hook blocked first, then resolve FIFO.
 	h.notify(responsePause)
 	h.notify(requestPause)
-	if h.model.paused != flow || h.model.pausedMsg != response || h.model.pausedToken != responsePause.Token {
+	if h.model.paused != responsePause.Flow || h.model.pausedMsg != responsePause.Msg || h.model.pausedToken != responsePause.Token {
 		t.Fatal("response pause was not active with its token")
 	}
 	if len(h.model.pauseQueue) != 1 ||
 		h.model.pauseQueue[0].Token != requestPause.Token ||
-		h.model.pauseQueue[0].Flow != flow ||
-		h.model.pauseQueue[0].Msg != request {
+		h.model.pauseQueue[0].Flow != requestPause.Flow ||
+		h.model.pauseQueue[0].Msg != requestPause.Msg {
 		t.Fatalf("queued same-flow request = %#v, want its own token and message", h.model.pauseQueue)
 	}
 
@@ -239,7 +242,7 @@ func TestPauseQueueResolvesConcurrentSameFlowPausesOutOfOrder(t *testing.T) {
 	if flow.Status != capture.StatusPending {
 		t.Fatalf("shared flow status with queued request = %s, want PAUSED", flow.Status)
 	}
-	if h.model.paused != flow || h.model.pausedMsg != request || h.model.pausedToken != requestPause.Token {
+	if h.model.paused != requestPause.Flow || h.model.pausedMsg != requestPause.Msg || h.model.pausedToken != requestPause.Token {
 		t.Fatal("request pause was not promoted with its own token")
 	}
 

@@ -2,9 +2,13 @@ package capture
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -82,5 +86,117 @@ func TestSessionRoundTrip(t *testing.T) {
 	}
 	if g.Response == nil || string(g.Response.Body) != "world" {
 		t.Errorf("response not preserved: %+v", g.Response)
+	}
+}
+
+func TestSaveNilSessionLoadsAsEmptyArray(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Save(&buf, nil); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	flows, err := Load(&buf)
+	if err != nil {
+		t.Fatalf("Load saved empty session: %v", err)
+	}
+	if len(flows) != 0 {
+		t.Fatalf("loaded %d flows, want none", len(flows))
+	}
+}
+
+func TestLoadRejectsNullTraversalAndStructurallyInvalidFlows(t *testing.T) {
+	tests := []struct {
+		name    string
+		session string
+	}{
+		{name: "null flow", session: `[null]`},
+		{name: "null session", session: `null`},
+		{name: "path traversal ID", session: `[{"ID":"../../outside","Protocol":"http/1.1","Status":2}]`},
+		{name: "uppercase ID", session: `[{"ID":"0123456789AB","Protocol":"http/1.1","Status":2}]`},
+		{name: "unknown protocol", session: `[{"ID":"0123456789ab","Protocol":"smtp","Status":2}]`},
+		{name: "invalid request direction", session: `[{"ID":"0123456789ab","Protocol":"http/1.1","Status":2,"Request":{"Direction":1}}]`},
+		{name: "null streaming message", session: `[{"ID":"0123456789ab","Protocol":"tcp","Status":2,"Messages":[null]}]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Load(strings.NewReader(tc.session)); err == nil {
+				t.Fatal("Load accepted an invalid imported flow")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsRepresentationsAndMetadataBeyondBudgets(t *testing.T) {
+	flow := NewFlow("client", "server:443")
+	flow.Protocol = ProtoHTTP1
+	flow.Request = &Message{
+		Direction: ClientToServer,
+		Body:      bytes.Repeat([]byte{'b'}, MaxRetainedLogicalBodyBytes+1),
+	}
+	var body bytes.Buffer
+	if err := Save(&body, []*Flow{flow}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := Load(&body); err == nil {
+		t.Fatal("Load accepted oversized decoded representation")
+	}
+
+	session := `[{"ID":"0123456789ab","Protocol":"http/1.1","Status":2,"Request":{"Direction":0,"Headers":{"X":["` +
+		strings.Repeat("a", MaxRetainedHeaderBytes) + `"]}}}]`
+	if _, err := Load(strings.NewReader(session)); err == nil {
+		t.Fatal("Load accepted oversized headers")
+	}
+}
+
+func TestDecodeSessionHeadersBoundsEmptyEntriesBeforeMapInsertion(t *testing.T) {
+	headers, err := decodeSessionHeaders(json.NewDecoder(strings.NewReader(`{"":[]}`)))
+	if err != nil {
+		t.Fatalf("decode empty header: %v", err)
+	}
+	if values, ok := headers[""]; !ok || len(values) != 0 {
+		t.Fatalf("empty header array = %#v, want retained empty entry", headers)
+	}
+
+	var input strings.Builder
+	input.WriteByte('{')
+	used := 0
+	for i := 0; used <= MaxRetainedHeaderBytes; i++ {
+		if i > 0 {
+			input.WriteByte(',')
+		}
+		key := strconv.FormatInt(int64(i), 36)
+		used += storageBytes(key)
+		input.WriteString(`"`)
+		input.WriteString(key)
+		input.WriteString(`":[]`)
+	}
+	input.WriteByte('}')
+
+	if _, err := decodeSessionHeaders(json.NewDecoder(strings.NewReader(input.String()))); err == nil {
+		t.Fatal("decode accepted empty header entries beyond the retention budget")
+	}
+}
+
+func TestSessionBudgetReaderRejectsOversizedJSONStringBeforeDecode(t *testing.T) {
+	input := `"` + strings.Repeat("x", maxSessionJSONStringBytes()+1) + `"`
+	reader := &sessionBudgetReader{
+		r:         strings.NewReader(input),
+		remaining: MaxSessionInputBytes,
+		maxString: maxSessionJSONStringBytes(),
+	}
+	if _, err := io.ReadAll(reader); err == nil {
+		t.Fatal("session reader accepted an oversized JSON string")
+	}
+}
+
+func TestValidFlowIDAcceptsOnlyGeneratedFormat(t *testing.T) {
+	for _, id := range []string{"0123456789ab", "deadbeefcafe"} {
+		if !ValidFlowID(id) {
+			t.Errorf("ValidFlowID(%q) = false, want true", id)
+		}
+	}
+	for _, id := range []string{"", "0123456789a", "0123456789abc", "0123456789AB", "../deadbeef", "0123456789a/"} {
+		if ValidFlowID(id) {
+			t.Errorf("ValidFlowID(%q) = true, want false", id)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -170,8 +171,8 @@ func TestPrettyJSONExpandsEscapedNewlines(t *testing.T) {
 
 func TestExpandStringRendersTerminalControlsVisibly(t *testing.T) {
 	// json.Unmarshal turns the JSON escapes below into live terminal control
-	// characters. Expanded text must preserve its line break, while rendering
-	// those controls as harmless visible escapes.
+	// characters. Expanded text must render every control as a harmless visible
+	// escape, including its untrusted line break.
 	raw, err := json.Marshal("first line\nsecond \x1b[31mred\a\u009b1;2R")
 	if err != nil {
 		t.Fatalf("marshal expanded text: %v", err)
@@ -181,7 +182,7 @@ func TestExpandStringRendersTerminalControlsVisibly(t *testing.T) {
 	if !ok {
 		t.Fatal("escaped-newline text should expand")
 	}
-	for _, want := range []string{"first line\n", "second \\x1B[31mred\\x07\\u009B1;2R"} {
+	for _, want := range []string{`first line\x0Asecond \x1B[31mred\x07\u009B1;2R`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expanded output missing safe text %q: %q", want, out)
 		}
@@ -335,6 +336,80 @@ func TestPrettyJSONLargeBodyWithManyEmbeddedStrings(t *testing.T) {
 	for _, want := range []string{"command", "ls -la", "expanded"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("large body expansion missing %q", want)
+		}
+	}
+}
+
+func TestSanitizeCaptureTextEscapesEveryC0AndC1Control(t *testing.T) {
+	var input strings.Builder
+	for r := rune(0); r <= 0x1f; r++ {
+		input.WriteRune(r)
+	}
+	input.WriteRune(0x7f)
+	for r := rune(0x80); r <= 0x9f; r++ {
+		input.WriteRune(r)
+	}
+
+	got := sanitizeCaptureText(input.String())
+	for _, r := range got {
+		if r <= 0x1f || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			t.Fatalf("sanitized text retained control %U in %q", r, got)
+		}
+	}
+	for _, want := range []string{`\x00`, `\x1F`, `\x7F`, `\u0080`, `\u009F`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("sanitized text missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestCaptureEditorSeedEscapesControlsAndKeepsLines(t *testing.T) {
+	unsafe := "\x1b]8;;https://attacker.example\x07"
+	m := Model{
+		ta:        newEditor(),
+		pausedMsg: &capture.Message{Raw: []byte("GET / HTTP/1.1\r\nX-Test: " + unsafe + "\r\n\r\nbody")},
+	}
+	m.enterEdit()
+	if got := m.ta.Value(); strings.Contains(got, unsafe) {
+		t.Fatalf("editor seed emitted unsafe control sequence %q", got)
+	}
+	if got := m.ta.Value(); !strings.Contains(got, `\x1B]8;;https://attacker.example\x07`) {
+		t.Errorf("editor seed did not escape terminal control: %q", got)
+	}
+	if got := m.ta.Value(); got != strings.ReplaceAll(got, "\r", "") {
+		t.Errorf("editor seed retained carriage return: %q", got)
+	}
+	if got := m.ta.Value(); !strings.Contains(got, "\nX-Test:") {
+		t.Errorf("editor seed lost request line boundaries: %q", got)
+	}
+}
+
+func TestRenderFlowDetailEscapesCapturedTerminalControls(t *testing.T) {
+	osc := "\x1b]8;;https://attacker.example\x07"
+	c1 := "\u009b1;2R"
+	f := capture.NewFlow("client", "server"+osc)
+	f.Protocol = capture.Protocol("http" + c1)
+	f.SNI = "sni" + osc
+	f.Err = errors.New("error" + c1)
+	f.Request = &capture.Message{
+		Direction: capture.ClientToServer,
+		Summary:   "GET " + osc,
+		Headers:   map[string][]string{"X" + c1: {"value" + osc}},
+		Meta:      map[string]string{"meta" + osc: "value" + c1},
+		Body:      []byte(strings.Repeat("text ", 24) + "\n" + osc + c1),
+	}
+	f.Response = &capture.Message{Summary: "response" + c1}
+	f.Messages = []*capture.Message{{Direction: capture.ServerToClient, Summary: "stream" + osc, Body: []byte("body" + c1)}}
+
+	out := renderFlowDetail(f, 80, true)
+	for _, unsafe := range []string{osc, c1} {
+		if strings.Contains(out, unsafe) {
+			t.Errorf("detail emitted untrusted terminal sequence %q: %q", unsafe, out)
+		}
+	}
+	for _, safe := range []string{`\x1B]8;;https://attacker.example\x07`, `\u009B1;2R`, `\x0A`} {
+		if !strings.Contains(out, safe) {
+			t.Errorf("detail missing escaped capture text %q: %q", safe, out)
 		}
 	}
 }

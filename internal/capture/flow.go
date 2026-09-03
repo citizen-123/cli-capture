@@ -86,9 +86,18 @@ type Message struct {
 	// streaming protocols. It is what the tamper editor seeds from and what an
 	// edited Resolution.EditedBody replaces.
 	Raw []byte
+	// Truncated reports that Body or Raw exceeded its retention budget. A
+	// truncated message is display-only and must not be replayed or edited as a
+	// complete message.
+	Truncated bool
 	// Meta carries protocol-specific fields that don't fit Headers/Body
 	// (gRPC status, WS opcode, HTTP method/path, …).
 	Meta map[string]string
+}
+
+// Snapshot returns an independent deep copy of a message.
+func (m *Message) Snapshot() *Message {
+	return cloneMessage(m)
 }
 
 // Flow is one logical exchange over one connection.
@@ -111,15 +120,48 @@ type Flow struct {
 	// Messages for streaming protocols (ordered). Guard appends with
 	// AddMessage: streaming protocols pump both directions concurrently.
 	Messages []*Message
-	mu       sync.Mutex
+	// Truncated reports that one or more messages or request/response bodies
+	// could not be retained completely.
+	Truncated bool
+	mu        sync.RWMutex
 }
 
-// AddMessage appends a streaming message under a lock, so the two
-// per-direction pump goroutines of a streaming protocol don't race.
-func (f *Flow) AddMessage(m *Message) {
+// Mutate serializes changes to a live flow. Producers must complete related
+// field changes in one callback before notifying the Store with Touch.
+func (f *Flow) Mutate(fn func()) {
+	if f == nil || fn == nil {
+		return
+	}
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn()
+}
+
+// Snapshot returns an independent, deep copy that can safely outlive the
+// producer. Maps, slices, and messages never share mutable storage with f.
+func (f *Flow) Snapshot() *Flow {
+	if f == nil {
+		return nil
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return cloneFlow(f)
+}
+
+// AddMessage appends a streaming message under the flow lock. Messages beyond
+// the count or aggregate-byte retention policy are not retained.
+func (f *Flow) AddMessage(m *Message) {
+	if m == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.Messages) >= MaxMessagesPerFlow {
+		f.Truncated = true
+		return
+	}
 	f.Messages = append(f.Messages, m)
-	f.mu.Unlock()
+	limitFlowLocked(f)
 }
 
 // newID returns a short random hex id. crypto/rand keeps ids unpredictable so
@@ -144,6 +186,11 @@ func NewFlow(client, server string) *Flow {
 
 // Title is the compact label shown in the flow list.
 func (f *Flow) Title() string {
+	if f == nil {
+		return ""
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	host := f.ServerAddr
 	if f.SNI != "" {
 		host = f.SNI

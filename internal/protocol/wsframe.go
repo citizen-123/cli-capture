@@ -3,7 +3,10 @@ package protocol
 import (
 	"bufio"
 	"encoding/binary"
+	"fmt"
 	"io"
+
+	"github.com/citizen-123/cli-capture/internal/capture"
 )
 
 // RFC 6455 opcodes.
@@ -31,8 +34,9 @@ type wsFrame struct {
 	Payload []byte
 }
 
-// readWSFrame decodes one frame, unmasking the payload if it was masked
-// (client→server frames always are).
+// readWSFrame decodes one RFC 6455 frame, unmasking its payload when present.
+// It deliberately rejects reserved bits, invalid opcodes, malformed control
+// frames, and lengths beyond the retention/parser budget before allocating.
 func readWSFrame(r *bufio.Reader) (*wsFrame, error) {
 	b0, err := r.ReadByte()
 	if err != nil {
@@ -42,32 +46,54 @@ func readWSFrame(r *bufio.Reader) (*wsFrame, error) {
 	if err != nil {
 		return nil, err
 	}
+	if b0&0x70 != 0 {
+		return nil, fmt.Errorf("WebSocket frame uses unsupported reserved bits")
+	}
+	opcode := b0 & 0x0f
+	if !validWSOpcode(opcode) {
+		return nil, fmt.Errorf("invalid WebSocket opcode %#x", opcode)
+	}
 	fr := &wsFrame{
 		Fin:    b0&0x80 != 0,
-		Opcode: b0 & 0x0f,
+		Opcode: opcode,
 		Masked: b1&0x80 != 0,
 	}
-	length := int(b1 & 0x7f)
+	length := uint64(b1 & 0x7f)
 	switch length {
 	case 126:
 		var ext [2]byte
 		if _, err := io.ReadFull(r, ext[:]); err != nil {
 			return nil, err
 		}
-		length = int(binary.BigEndian.Uint16(ext[:]))
+		length = uint64(binary.BigEndian.Uint16(ext[:]))
+		if length < 126 {
+			return nil, fmt.Errorf("non-canonical WebSocket frame length")
+		}
 	case 127:
 		var ext [8]byte
 		if _, err := io.ReadFull(r, ext[:]); err != nil {
 			return nil, err
 		}
-		length = int(binary.BigEndian.Uint64(ext[:]))
+		if ext[0]&0x80 != 0 {
+			return nil, fmt.Errorf("invalid WebSocket 64-bit frame length")
+		}
+		length = binary.BigEndian.Uint64(ext[:])
+		if length < 65536 {
+			return nil, fmt.Errorf("non-canonical WebSocket frame length")
+		}
+	}
+	if length > capture.MaxFrameBytes {
+		return nil, fmt.Errorf("WebSocket frame exceeds %d-byte limit: %d", capture.MaxFrameBytes, length)
+	}
+	if isWSControl(fr.Opcode) && (!fr.Fin || length > 125) {
+		return nil, fmt.Errorf("invalid fragmented or oversized WebSocket control frame")
 	}
 	if fr.Masked {
 		if _, err := io.ReadFull(r, fr.MaskKey[:]); err != nil {
 			return nil, err
 		}
 	}
-	fr.Payload = make([]byte, length)
+	fr.Payload = make([]byte, int(length))
 	if _, err := io.ReadFull(r, fr.Payload); err != nil {
 		return nil, err
 	}
@@ -127,6 +153,17 @@ func wsMask(p []byte, key [4]byte) {
 func isWSData(op byte) bool {
 	return op == opContinuation || op == opText || op == opBinary
 }
+
+func validWSOpcode(op byte) bool {
+	switch op {
+	case opContinuation, opText, opBinary, opClose, opPing, opPong:
+		return true
+	default:
+		return false
+	}
+}
+
+func isWSControl(op byte) bool { return op >= opClose && op <= opPong }
 
 func wsOpcodeName(op byte) string {
 	switch op {

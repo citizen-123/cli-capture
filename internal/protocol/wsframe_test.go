@@ -3,6 +3,10 @@ package protocol
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
+
+	"github.com/citizen-123/cli-capture/internal/capture"
+
 	"strings"
 	"testing"
 )
@@ -66,5 +70,22 @@ func TestParseStatusCode(t *testing.T) {
 		if got := parseStatusCode(line); got != want {
 			t.Errorf("parseStatusCode(%q) = %d, want %d", strings.TrimSpace(line), got, want)
 		}
+	}
+}
+
+func TestReadWSFrameRejectsOversizedDeclaredLengthBeforeAllocation(t *testing.T) {
+	wire := make([]byte, 10)
+	wire[0] = 0x80 | opBinary
+	wire[1] = 127
+	binary.BigEndian.PutUint64(wire[2:], uint64(capture.MaxFrameBytes+1))
+
+	if _, err := readWSFrame(bufio.NewReader(bytes.NewReader(wire))); err == nil {
+		t.Fatal("oversized declared WebSocket length was accepted")
+	}
+}
+
+func TestReadWSFrameRejectsReservedFlags(t *testing.T) {
+	if _, err := readWSFrame(bufio.NewReader(bytes.NewReader([]byte{0x80 | 0x40 | opText, 0}))); err == nil {
+		t.Fatal("reserved WebSocket flag was accepted")
 	}
 }

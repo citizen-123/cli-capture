@@ -6,6 +6,7 @@ package protocol
 
 import (
 	"bufio"
+	"context"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
@@ -48,6 +49,44 @@ type Tamperer interface {
 	// when it will actually be intercepted) versus stream it through untouched.
 	ShouldInterceptRequest(f *capture.Flow) bool
 	ShouldInterceptResponse(f *capture.Flow) bool
+}
+
+// ContextualTamperer is an optional extension for transports whose stream
+// lifetime is represented by a context. It lets an intercept wait terminate
+// when that stream is canceled without coupling protocol code to intercept.
+type ContextualTamperer interface {
+	BeforeForwardContext(context.Context, *capture.Flow, *capture.Message) (out []byte, drop bool)
+	BeforeDeliverContext(context.Context, *capture.Flow, *capture.Message) (out []byte, drop bool)
+}
+
+// BeforeForwardContext calls the context-aware hook when available and
+// otherwise preserves the base Tamperer behavior.
+func BeforeForwardContext(ctx context.Context, tamper Tamperer, f *capture.Flow, msg *capture.Message) (out []byte, drop bool) {
+	if contextual, ok := tamper.(ContextualTamperer); ok {
+		return contextual.BeforeForwardContext(ctx, f, msg)
+	}
+	return tamper.BeforeForward(f, msg)
+}
+
+// BeforeDeliverContext calls the context-aware hook when available and
+// otherwise preserves the base Tamperer behavior.
+func BeforeDeliverContext(ctx context.Context, tamper Tamperer, f *capture.Flow, msg *capture.Message) (out []byte, drop bool) {
+	if contextual, ok := tamper.(ContextualTamperer); ok {
+		return contextual.BeforeDeliverContext(ctx, f, msg)
+	}
+	return tamper.BeforeDeliver(f, msg)
+}
+
+// pauseCanceler is optional so protocol handlers stay independent from the
+// intercept package while still releasing waits when a transport terminates.
+type pauseCanceler interface {
+	CancelFlow(*capture.Flow)
+}
+
+func cancelPendingPauses(t Tamperer, f *capture.Flow) {
+	if c, ok := t.(pauseCanceler); ok {
+		c.CancelFlow(f)
+	}
 }
 
 // registry holds every known protocol, tried in registration order.

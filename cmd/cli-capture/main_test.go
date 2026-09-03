@@ -158,6 +158,96 @@ func TestTransparentTargetCredentialsRejectsProxyUID(t *testing.T) {
 	}
 }
 
+func TestValidateListenerAddressesRejectsExternalTransparentBind(t *testing.T) {
+	if err := validateListenerAddresses("127.0.0.1:0", "0.0.0.0:0"); err == nil {
+		t.Fatal("external transparent listener was accepted")
+	}
+	if err := validateListenerAddresses("127.0.0.1:0", "[::]:0"); err == nil {
+		t.Fatal("IPv6 wildcard transparent listener was accepted")
+	}
+	if err := validateListenerAddresses("127.0.0.1:0", "localhost:0"); err == nil {
+		t.Fatal("hostname transparent listener was accepted")
+	}
+	if err := validateListenerAddresses("127.0.0.1:0", "[::1]:0"); err != nil {
+		t.Fatalf("loopback transparent listener rejected: %v", err)
+	}
+}
+
+func TestReleaseWorkflowManualDispatchRequiresVerifiedTag(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate release workflow test file")
+	}
+	repo := filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", ".."))
+	workflowPath := filepath.Join(repo, ".github", "workflows", "release.yml")
+	workflow, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", workflowPath, err)
+	}
+	text := string(workflow)
+	for _, contract := range []string{
+		"permissions:\n  contents: read",
+		`v*) ref="refs/tags/$DISPATCH_TAG" ;;`,
+		`Manual release input must name a v* tag, not a branch or ref.`,
+		`git check-ref-format --allow-onelevel "$ref"`,
+		`git ls-remote --refs "$remote" "$ref"`,
+		`Release tag changed while it was being verified`,
+		`ref: ${{ needs.changes.outputs.sha }}`,
+	} {
+		if !strings.Contains(text, contract) {
+			t.Errorf("release workflow is missing verified-tag contract %q", contract)
+		}
+	}
+	if strings.Contains(text, "github.event.inputs.tag || github.ref") {
+		t.Error("release workflow still lets manual input select a publisher checkout ref")
+	}
+
+	readme, err := os.ReadFile(filepath.Join(repo, "README.md"))
+	if err != nil {
+		t.Fatalf("read README attestation instructions: %v", err)
+	}
+	if strings.Contains(string(readme), "refs/heads/") {
+		t.Error("README attestation identity accepts a branch ref")
+	}
+	if !strings.Contains(string(readme), "release\\.yml@refs/tags/v.+$") {
+		t.Error("README attestation identity is not limited to version tags")
+	}
+}
+
+func TestApplyTransparentRedirectCatchesSignalDuringRuleApplication(t *testing.T) {
+	cleaned := false
+	state, backend, err := applyTransparentRedirect(func() (func() error, string, error) {
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			t.Fatalf("send SIGTERM during rule application: %v", err)
+		}
+		return func() error {
+			cleaned = true
+			return nil
+		}, "nft", nil
+	})
+	if err != nil {
+		t.Fatalf("applyTransparentRedirect: %v", err)
+	}
+	if backend != "nft" {
+		t.Fatalf("backend = %q, want nft", backend)
+	}
+	defer state.stopSignals()
+
+	select {
+	case got := <-state.signals:
+		if got != syscall.SIGTERM {
+			t.Fatalf("signal during application = %v, want SIGTERM", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("signal during rule application was not registered")
+	}
+
+	state.teardown()
+	if !cleaned {
+		t.Fatal("signal-protected rule lifecycle did not retain its teardown")
+	}
+}
+
 func TestExecuteCaptureTargetNotFoundTearsDownRedirect(t *testing.T) {
 	var events []string
 	lifecycle := recordingLifecycle(&events, runner.ErrTargetNotFound, nil)
@@ -170,9 +260,9 @@ func TestExecuteCaptureTargetNotFoundTearsDownRedirect(t *testing.T) {
 		"proxy start",
 		"transparent start",
 		"target start",
-		"signals stop",
-		"rules teardown",
 		"listener close",
+		"rules teardown",
+		"signals stop",
 		"proxy close",
 	})
 }
@@ -201,9 +291,9 @@ func TestExecuteCaptureProgramOutcomesCleanExactlyOnceInOrder(t *testing.T) {
 				"program run",
 				"terminal close",
 				"target and PTY close",
-				"signals stop",
-				"rules teardown",
 				"listener close",
+				"rules teardown",
+				"signals stop",
 				"proxy close",
 			})
 		})
@@ -249,9 +339,9 @@ func TestExecuteCaptureSignalQuitsThenCleansExactlyOnce(t *testing.T) {
 		"program run",
 		"terminal close",
 		"target and PTY close",
-		"signals stop",
-		"rules teardown",
 		"listener close",
+		"rules teardown",
+		"signals stop",
 		"proxy close",
 	})
 }

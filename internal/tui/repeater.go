@@ -55,10 +55,10 @@ func (m *Model) openRepeater() {
 		return
 	}
 	req := newEditor()
-	req.SetValue(tmpl.Raw())
+	req.SetValue(sanitizeCaptureMultilineText(tmpl.Raw()))
 	req.Focus()
 	pay := newEditor()
-	pay.SetValue(prefillPayloads(tmpl.Variables()))
+	pay.SetValue(sanitizeCaptureMultilineText(prefillPayloads(tmpl.Variables())))
 	pay.Blur()
 
 	m.rep = repeaterState{base: tmpl, req: req, payload: pay, respVP: viewport.New(0, 0), mode: repeater.Single, focus: repFocusReq}
@@ -207,7 +207,7 @@ func (m *Model) sizeRepeater() {
 }
 
 func (m Model) repeaterView() string {
-	title := "Repeater " + glyphArrow + " " + m.rep.base.Method + " " + m.rep.base.URL
+	title := "Repeater " + glyphArrow + " " + sanitizeCaptureText(m.rep.base.Method) + " " + sanitizeCaptureText(m.rep.base.URL)
 	reqLabel := sectionStyle.Render("Request") + focusMark(m.rep.focus == repFocusReq)
 	payLabel := sectionStyle.Render("Payloads") +
 		dimStyle.Render("  ["+m.rep.mode.String()+"]  name = a, b, c") + focusMark(m.rep.focus == repFocusPayload)
@@ -215,7 +215,7 @@ func (m Model) repeaterView() string {
 
 	footer := dimStyle.Render("Tab switch · Ctrl+O mode · Ctrl+S send · Esc close")
 	if m.rep.result != "" {
-		footer = pendingStyle.Render(m.rep.result) + "   " + footer
+		footer = pendingStyle.Render(sanitizeCaptureText(m.rep.result)) + "   " + footer
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -236,7 +236,7 @@ func renderRepeaterResponse(f *capture.Flow, width int) string {
 	if f == nil || f.Response == nil {
 		return dimStyle.Render("(no response yet — Ctrl+S to send)")
 	}
-	body := codeStyle(f).Render(f.Response.Summary) + "\n\n" + renderMessage(f.Response, width, true)
+	body := codeStyle(f).Render(sanitizeCaptureText(f.Response.Summary)) + "\n\n" + renderMessage(f.Response, width, true)
 	return ansi.Hardwrap(body, width, false)
 }
 

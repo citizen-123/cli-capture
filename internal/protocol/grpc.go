@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/citizen-123/cli-capture/internal/capture"
 )
 
 // GRPCMessage is one length-prefixed gRPC message unwrapped from a stream.
@@ -17,7 +19,21 @@ type GRPCMessage struct {
 // EncodeGRPCFrames serializes messages into the gRPC wire format while
 // preserving their order and per-message compression flag.
 func EncodeGRPCFrames(messages []GRPCMessage) ([]byte, error) {
+	if len(messages) > capture.MaxMessagesPerFlow {
+		return nil, fmt.Errorf("too many gRPC messages: %d", len(messages))
+	}
+	total := 0
+	for _, message := range messages {
+		if len(message.Data) > capture.MaxFrameBytes {
+			return nil, fmt.Errorf("gRPC message exceeds %d-byte limit", capture.MaxFrameBytes)
+		}
+		if total > capture.MaxRetainedWireBodyBytes-5-len(message.Data) {
+			return nil, fmt.Errorf("gRPC body exceeds %d-byte limit", capture.MaxRetainedWireBodyBytes)
+		}
+		total += 5 + len(message.Data)
+	}
 	var out bytes.Buffer
+	out.Grow(total)
 	for _, message := range messages {
 		if err := writeGRPCFrame(&out, message); err != nil {
 			return nil, err
@@ -27,8 +43,8 @@ func EncodeGRPCFrames(messages []GRPCMessage) ([]byte, error) {
 }
 
 func writeGRPCFrame(w io.Writer, message GRPCMessage) error {
-	if uint64(len(message.Data)) > uint64(^uint32(0)) {
-		return fmt.Errorf("gRPC message is too large to frame: %d bytes", len(message.Data))
+	if len(message.Data) > capture.MaxFrameBytes {
+		return fmt.Errorf("gRPC message exceeds %d-byte limit", capture.MaxFrameBytes)
 	}
 	var header [5]byte
 	if message.Compressed {
@@ -45,16 +61,25 @@ func writeGRPCFrame(w io.Writer, message GRPCMessage) error {
 // DecodeGRPCFrames parses a complete gRPC request body. Unlike the streaming
 // observer, it rejects partial frames and invalid compression flags.
 func DecodeGRPCFrames(body []byte) ([]GRPCMessage, error) {
+	if len(body) > capture.MaxRetainedWireBodyBytes {
+		return nil, fmt.Errorf("gRPC body exceeds %d-byte limit", capture.MaxRetainedWireBodyBytes)
+	}
 	var messages []GRPCMessage
 	for len(body) > 0 {
+		if len(messages) >= capture.MaxMessagesPerFlow {
+			return nil, fmt.Errorf("too many gRPC messages")
+		}
 		if len(body) < 5 {
 			return nil, fmt.Errorf("incomplete gRPC frame header: %d trailing bytes", len(body))
 		}
 		if body[0] != 0 && body[0] != 1 {
 			return nil, fmt.Errorf("unsupported gRPC compression flag %d", body[0])
 		}
-		length := uint64(binary.BigEndian.Uint32(body[1:5]))
-		if length > uint64(len(body)-5) {
+		length := binary.BigEndian.Uint32(body[1:5])
+		if length > capture.MaxFrameBytes {
+			return nil, fmt.Errorf("gRPC frame exceeds %d-byte limit: %d", capture.MaxFrameBytes, length)
+		}
+		if int(length) > len(body)-5 {
 			return nil, fmt.Errorf("incomplete gRPC frame payload: declared %d bytes, have %d", length, len(body)-5)
 		}
 		end := 5 + int(length)
@@ -76,36 +101,106 @@ func DecodeGRPCFrames(body []byte) ([]GRPCMessage, error) {
 type grpcFramer struct {
 	src       io.Reader
 	onMessage func(GRPCMessage)
+	onError   func(error)
 	buf       bytes.Buffer
+	discard   uint64
 }
 
 // NewGRPCFramer wraps src so that every complete gRPC message read through it is
 // reported to onMessage. The returned reader yields exactly src's bytes.
 func NewGRPCFramer(src io.Reader, onMessage func(GRPCMessage)) io.Reader {
-	return &grpcFramer{src: src, onMessage: onMessage}
+	return NewGRPCFramerWithError(src, onMessage, nil)
+}
+
+// NewGRPCFramerWithError is NewGRPCFramer with a notification for malformed or
+// over-budget frames. Those bytes still pass through unchanged, but are never
+// accumulated as an inspectable message.
+func NewGRPCFramerWithError(src io.Reader, onMessage func(GRPCMessage), onError func(error)) io.Reader {
+	return &grpcFramer{src: src, onMessage: onMessage, onError: onError}
 }
 
 func (g *grpcFramer) Read(p []byte) (int, error) {
 	n, err := g.src.Read(p)
 	if n > 0 {
-		g.buf.Write(p[:n])
-		g.drain()
+		g.observe(p[:n])
 	}
 	return n, err
 }
 
+func (g *grpcFramer) observe(p []byte) {
+	for len(p) > 0 {
+		if g.discard > 0 {
+			n := uint64(len(p))
+			if n > g.discard {
+				n = g.discard
+			}
+			p = p[n:]
+			g.discard -= n
+			continue
+		}
+
+		room := 5 + capture.MaxFrameBytes - g.buf.Len()
+		if room <= 0 {
+			g.report(fmt.Errorf("gRPC frame exceeds %d-byte limit", capture.MaxFrameBytes))
+			g.buf.Reset()
+			continue
+		}
+		n := len(p)
+		if n > room {
+			n = room
+		}
+		_, _ = g.buf.Write(p[:n])
+		p = p[n:]
+		g.drain()
+	}
+}
+
 func (g *grpcFramer) drain() {
-	for {
-		if g.buf.Len() < 5 {
+	for g.discard == 0 && g.buf.Len() >= 5 {
+		header := g.buf.Bytes()
+		flag := header[0]
+		length := uint64(binary.BigEndian.Uint32(header[1:5]))
+		if flag != 0 && flag != 1 {
+			g.rejectCurrent(length, fmt.Errorf("unsupported gRPC compression flag %d", flag))
 			return
 		}
-		length := int(binary.BigEndian.Uint32(g.buf.Bytes()[1:5]))
-		if g.buf.Len() < 5+length {
-			return // wait for the rest of this message
+		if length > capture.MaxFrameBytes {
+			g.rejectCurrent(length, fmt.Errorf("gRPC frame exceeds %d-byte limit: %d", capture.MaxFrameBytes, length))
+			return
 		}
-		frame := make([]byte, 5+length)
-		_, _ = io.ReadFull(&g.buf, frame)
-		g.onMessage(GRPCMessage{Compressed: frame[0]&1 == 1, Data: frame[5:]})
+		total := 5 + int(length)
+		if g.buf.Len() < total {
+			return
+		}
+		frame := g.buf.Next(total)
+		if g.onMessage != nil {
+			g.onMessage(GRPCMessage{
+				Compressed: flag == 1,
+				Data:       append([]byte(nil), frame[5:]...),
+			})
+		}
+	}
+}
+
+func (g *grpcFramer) rejectCurrent(length uint64, err error) {
+	payload := g.buf.Bytes()[5:]
+	available := uint64(len(payload))
+	var remainder []byte
+	if available > length {
+		remainder = append([]byte(nil), payload[length:]...)
+		available = length
+	}
+	g.buf.Reset()
+	g.discard = length - available
+	g.report(err)
+	if len(remainder) > 0 {
+		g.observe(remainder)
+	}
+}
+
+func (g *grpcFramer) report(err error) {
+	if g.onError != nil {
+		g.onError(err)
 	}
 }
 
@@ -121,9 +216,10 @@ type GRPCTransform func(GRPCMessage) (out []byte, drop bool)
 type grpcTamperReader struct {
 	src       io.Reader
 	transform GRPCTransform
-	in        bytes.Buffer // raw input awaiting a complete message
+	in        bytes.Buffer // raw input awaiting one complete bounded message
 	out       bytes.Buffer // re-framed output ready to serve
 	srcErr    error
+	readBuf   [32 * 1024]byte
 }
 
 // NewGRPCTamperReader wraps src so that each gRPC message is passed through
@@ -143,33 +239,45 @@ func (g *grpcTamperReader) Read(p []byte) (int, error) {
 }
 
 func (g *grpcTamperReader) fill() {
-	buf := make([]byte, 32*1024)
-	n, err := g.src.Read(buf)
+	n, err := g.src.Read(g.readBuf[:])
 	if n > 0 {
-		g.in.Write(buf[:n])
-		g.drain()
+		_, _ = g.in.Write(g.readBuf[:n])
+		if drainErr := g.drain(); drainErr != nil {
+			g.in.Reset()
+			g.srcErr = drainErr
+			return
+		}
 	}
 	if err != nil {
-		// Flush any trailing partial (malformed) bytes unchanged, then stop.
 		if g.in.Len() > 0 {
-			io.Copy(&g.out, &g.in)
+			g.in.Reset()
+			g.srcErr = fmt.Errorf("incomplete gRPC frame: %w", err)
+			return
 		}
 		g.srcErr = err
 	}
 }
 
-func (g *grpcTamperReader) drain() {
+func (g *grpcTamperReader) drain() error {
 	for {
 		if g.in.Len() < 5 {
-			return
+			return nil
 		}
-		length := int(binary.BigEndian.Uint32(g.in.Bytes()[1:5]))
-		if g.in.Len() < 5+length {
-			return
+		header := g.in.Bytes()
+		flag := header[0]
+		if flag != 0 && flag != 1 {
+			return fmt.Errorf("unsupported gRPC compression flag %d", flag)
 		}
-		frame := make([]byte, 5+length)
-		_, _ = io.ReadFull(&g.in, frame)
-		msg := GRPCMessage{Compressed: frame[0]&1 == 1, Data: frame[5:]}
+		length := binary.BigEndian.Uint32(header[1:5])
+		if length > capture.MaxFrameBytes {
+			return fmt.Errorf("gRPC frame exceeds %d-byte limit: %d", capture.MaxFrameBytes, length)
+		}
+		total := 5 + int(length)
+		if g.in.Len() < total {
+			return nil
+		}
+		frame := g.in.Next(total)
+		msg := GRPCMessage{Compressed: flag == 1, Data: append([]byte(nil), frame[5:]...)}
 		out, drop := g.transform(msg)
 		if drop {
 			continue
@@ -177,7 +285,9 @@ func (g *grpcTamperReader) drain() {
 		if out == nil {
 			out = msg.Data
 		}
-		_ = writeGRPCFrame(&g.out, GRPCMessage{Compressed: msg.Compressed, Data: out})
+		if err := writeGRPCFrame(&g.out, GRPCMessage{Compressed: msg.Compressed, Data: out}); err != nil {
+			return err
+		}
 	}
 }
 
@@ -206,22 +316,29 @@ func ProtoFieldSummary(data []byte) string {
 			}
 			i += m
 		case 1: // 64-bit
+			if len(data)-i < 8 {
+				return strings.Join(fields, " ")
+			}
 			i += 8
 		case 2: // length-delimited
 			l, m := binary.Uvarint(data[i:])
 			if m <= 0 {
 				return strings.Join(fields, " ")
 			}
+			remaining := len(data) - i - m
+			if remaining < 0 || l > uint64(remaining) {
+				return strings.Join(fields, " ")
+			}
 			i += m + int(l)
 		case 5: // 32-bit
+			if len(data)-i < 4 {
+				return strings.Join(fields, " ")
+			}
 			i += 4
 		default:
 			return strings.Join(fields, " ") // group wire types / unknown: stop
 		}
 		fields = append(fields, fmt.Sprintf("#%d(%s)", fieldNum, wireName(wire)))
-		if i > len(data) {
-			break
-		}
 	}
 	return strings.Join(fields, " ")
 }
