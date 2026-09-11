@@ -135,3 +135,50 @@ whatever the target sent, unredacted.
 show a flow to explain a bug, use a synthetic one against a local server, or
 redact it carefully before posting. Once it's in a public thread it's public,
 and edit history keeps what you removed.
+
+## Publishing a release
+
+A merged PR does not publish a release. The release workflow runs for `v*` tags.
+It builds Linux, macOS, and Windows binaries for amd64 and arm64.
+Release binaries include the version, commit, and build date.
+
+PR checks validate the GoReleaser configuration and build all six release
+archives without publishing. Both workflows use the same GoReleaser version.
+
+Before a stable release:
+
+1. Merge the reviewed PR after its checks pass.
+2. Make sure that `HOMEBREW_TAP_GITHUB_TOKEN` has Contents write access to `citizen-123/homebrew-tap`.
+3. Create a new semantic-version tag on the merged commit.
+4. Push that tag to trigger the release workflow.
+
+For example, after this change merges:
+
+```bash
+git switch main
+git pull --ff-only
+git tag -a v0.2.0 -m "Release v0.2.0"
+git push origin v0.2.0
+```
+
+The workflow publishes six archives and `checksums.txt` to GitHub Releases.
+GoReleaser then updates `Casks/cli-capture.rb` in the Homebrew tap with the
+published URLs and checksums. Do not edit that generated cask for an unpublished
+version. Prerelease tags do not replace the stable cask.
+
+After release, validate the workflow result and the tap update. Then install
+the published cask:
+
+```bash
+brew update
+brew upgrade --cask citizen-123/tap/cli-capture
+```
+
+Local builds in `~/.local/bin` can take precedence over Homebrew.
+`type -a cli-capture` shows that order. To inspect the Homebrew binary directly:
+
+```bash
+"$(brew --prefix)/bin/cli-capture" -version
+```
+
+The Homebrew binary must report the new version, not `dev`.

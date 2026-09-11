@@ -46,14 +46,15 @@ checksum:
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
-# Publish a Homebrew cask to citizen-123/homebrew-tap on every release.
-# (GoReleaser deprecated formula `brews` in favour of `homebrew_casks`; casks
-# are macOS-only — Linux users install via `go install` or the release binaries.)
+# Publish a Homebrew cask to citizen-123/homebrew-tap on each stable release.
+# The generated cask includes the Linux and macOS release archives.
 # Needs a token that can push to that repo — supplied via the
 # HOMEBREW_TAP_GITHUB_TOKEN secret in the release workflow (the default
 # GITHUB_TOKEN can't write to a different repository).
 homebrew_casks:
   - name: cli-capture
+    # Prereleases must not replace the stable Homebrew installation.
+    skip_upload: auto
     repository:
       owner: citizen-123
       name: homebrew-tap
