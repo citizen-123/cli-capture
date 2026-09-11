@@ -85,6 +85,6 @@ cli-capture -no-mitm '*.bank.example' -- some-cli
 cli-capture -mitm 'api.example.com' -- some-cli
 ```
 
-Interception is still **off until you arm it** with `Ctrl+A i` — scope decides
+Interception is still **off until you arm it** with `Ctrl+Space i` — scope decides
 *what* pauses, not *whether* anything does. See
 [intercepting](intercepting.md).

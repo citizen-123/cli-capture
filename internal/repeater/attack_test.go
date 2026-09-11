@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -141,13 +142,46 @@ func collectJobs(a Attack) []map[string]string {
 	return jobs
 }
 
-func TestModeString(t *testing.T) {
-	for m, want := range map[AttackMode]string{
-		Single: "single", Sniper: "sniper", BatteringRam: "battering-ram",
-		Pitchfork: "pitchfork", ClusterBomb: "cluster-bomb",
-	} {
-		if m.String() != want {
-			t.Errorf("%d.String() = %q, want %q", m, m.String(), want)
+func TestAttackCountMatchesExecution(t *testing.T) {
+	for mode, want := range map[AttackMode]int{Single: 1, Sniper: 5, BatteringRam: 2, Pitchfork: 2, ClusterBomb: 6} {
+		t.Run(mode.String(), func(t *testing.T) {
+			attack := Attack{Mode: mode, Positions: []string{"a", "b"}, Lists: [][]string{{"1", "2"}, {"3", "4", "5"}}}
+			count, err := attack.Count()
+			if err != nil || count != want || count != len(collectJobs(attack)) {
+				t.Fatalf("preview = %d, %v; execution = %d; want %d", count, err, len(collectJobs(attack)), want)
+			}
+		})
+	}
+}
+
+func TestAttackCountRetainsEmptyAndMismatchedSemantics(t *testing.T) {
+	for _, mode := range Modes {
+		for _, attack := range []Attack{
+			{Mode: mode},
+			{Mode: mode, Positions: []string{"a"}, Lists: [][]string{{}}},
+			{Mode: mode, Positions: []string{"a", "b"}, Lists: [][]string{{"1", "2"}}},
+			{Mode: mode, Lists: [][]string{{"1", "2"}}},
+		} {
+			count, err := attack.Count()
+			if err != nil || count != len(collectJobs(attack)) {
+				t.Fatalf("%s preview = %d, %v; execution = %d", mode, count, err, len(collectJobs(attack)))
+			}
 		}
+	}
+}
+
+func TestAttackCountRejectsOverflowAndHonorsEmptyDimension(t *testing.T) {
+	attack := Attack{Mode: ClusterBomb}
+	for i := range strconv.IntSize {
+		attack.Positions = append(attack.Positions, fmt.Sprintf("p%d", i))
+		attack.Lists = append(attack.Lists, []string{"0", "1"})
+	}
+	if _, err := attack.Count(); err == nil {
+		t.Fatal("unrepresentable product accepted")
+	}
+	attack.Positions = append(attack.Positions, "empty")
+	attack.Lists = append(attack.Lists, nil)
+	if count, err := attack.Count(); err != nil || count != 0 {
+		t.Fatalf("empty product = %d, %v; want zero despite preceding large dimensions", count, err)
 	}
 }

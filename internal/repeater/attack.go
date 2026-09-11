@@ -1,6 +1,9 @@
 package repeater
 
-import "iter"
+import (
+	"fmt"
+	"iter"
+)
 
 // AttackMode selects how payload lists are paired with insertion points, mirror-
 // ing Burp Intruder's modes.
@@ -48,6 +51,56 @@ type Attack struct {
 	Positions []string
 	Lists     [][]string
 	Base      map[string]string
+}
+
+// Count computes the number of yields from Jobs without enumerating them.
+// It retains the iterator's empty-list and mismatched-list semantics.
+func (a Attack) Count() (int, error) {
+	maxInt := int(^uint(0) >> 1)
+	switch a.Mode {
+	case Single:
+		return 1, nil
+	case Sniper:
+		n := 0
+		for _, list := range a.Lists[:min(len(a.Lists), len(a.Positions))] {
+			if len(list) > maxInt-n {
+				return 0, fmt.Errorf("request count is too large")
+			}
+			n += len(list)
+		}
+		return n, nil
+	case BatteringRam:
+		if len(a.Lists) == 0 {
+			return 0, nil
+		}
+		return len(a.Lists[0]), nil
+	case Pitchfork:
+		if len(a.Positions) == 0 || len(a.Lists) < len(a.Positions) {
+			return 0, nil
+		}
+		n := len(a.Lists[0])
+		for _, list := range a.Lists[1:len(a.Positions)] {
+			n = min(n, len(list))
+		}
+		return n, nil
+	case ClusterBomb:
+		lists := a.Lists[:min(len(a.Lists), len(a.Positions))]
+		for _, list := range lists {
+			if len(list) == 0 {
+				return 0, nil
+			}
+		}
+		n := 1
+		for _, list := range lists {
+			if n > maxInt/len(list) {
+				return 0, fmt.Errorf("request count is too large")
+			}
+			n *= len(list)
+		}
+		return n, nil
+	default:
+		return 0, fmt.Errorf("unknown attack mode %d", a.Mode)
+	}
 }
 
 // Jobs returns the ordered sequence of variable maps to send, one per request.

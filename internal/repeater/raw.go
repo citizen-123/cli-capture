@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 
+	"golang.org/x/net/http/httpguts"
+
 	"github.com/citizen-123/cli-capture/internal/capture"
 	"github.com/citizen-123/cli-capture/internal/protocol"
 )
@@ -49,10 +51,20 @@ func ParseRaw(raw string, base *Template) (*Template, error) {
 		return nil, fmt.Errorf("repeater: empty request")
 	}
 	fields := strings.Fields(lines[0])
-	if len(fields) < 2 {
+	if len(fields) != 3 {
 		return nil, fmt.Errorf("repeater: malformed request line %q", lines[0])
 	}
 	method, target := fields[0], fields[1]
+	if !httpguts.ValidHeaderFieldName(method) {
+		return nil, fmt.Errorf("repeater: invalid request method %q", method)
+	}
+	if _, _, ok := http.ParseHTTPVersion(fields[2]); !ok {
+		return nil, fmt.Errorf("repeater: invalid HTTP version %q", fields[2])
+	}
+	target, err := parseTemplateTarget(target)
+	if err != nil {
+		return nil, err
+	}
 
 	header := http.Header{}
 	for _, ln := range lines[1:] {
@@ -60,10 +72,14 @@ func ParseRaw(raw string, base *Template) (*Template, error) {
 			continue
 		}
 		k, v, ok := strings.Cut(ln, ":")
-		if !ok {
-			continue
+		if !ok || !httpguts.ValidHeaderFieldName(k) {
+			return nil, fmt.Errorf("repeater: malformed request header %q", ln)
 		}
-		header.Add(strings.TrimSpace(k), strings.TrimSpace(v))
+		v = strings.Trim(v, " \t")
+		if !httpguts.ValidHeaderFieldValue(v) {
+			return nil, fmt.Errorf("repeater: invalid value for request header %q", k)
+		}
+		header.Add(k, v)
 	}
 	header.Del("Host") // the target host comes from base; don't send an edited Host twice
 
@@ -74,16 +90,14 @@ func ParseRaw(raw string, base *Template) (*Template, error) {
 		secure = base.Secure
 		proto = base.Protocol
 		messages = cloneGRPCMessages(base.Messages)
-		if u, err := url.Parse(base.URL); err == nil {
-			if u.Scheme != "" {
-				scheme = u.Scheme
-			}
-			host = u.Host
+		u, err := url.Parse(base.URL)
+		if err != nil {
+			return nil, fmt.Errorf("repeater: invalid base target: %w", err)
 		}
-	}
-	// If the edited target is absolute, honor its path/query (but keep base host).
-	if u, err := url.Parse(target); err == nil && u.IsAbs() {
-		target = u.RequestURI()
+		if u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+			return nil, fmt.Errorf("repeater: base target needs an HTTP or HTTPS origin")
+		}
+		scheme, host = u.Scheme, u.Host
 	}
 
 	templateBody := []byte(body)
@@ -117,6 +131,37 @@ func ParseRaw(raw string, base *Template) (*Template, error) {
 		Protocol: proto,
 		Secure:   secure,
 	}, nil
+}
+
+// Validate the target's shape without interpreting insertion points as URL
+// escapes. Actual substituted values are validated when the template renders.
+func parseTemplateTarget(target string) (string, error) {
+	values := make(map[string]string)
+	for _, name := range Variables(target) {
+		values[name] = "00"
+	}
+	parsed, err := url.ParseRequestURI(Substitute(target, values))
+	if err != nil || strings.Contains(target, "#") {
+		return "", fmt.Errorf("repeater: invalid request target %q", target)
+	}
+	if strings.HasPrefix(target, "/") {
+		return target, nil
+	}
+	if !parsed.IsAbs() || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", fmt.Errorf("repeater: request target must be a path or absolute HTTP URL")
+	}
+	// Keep the original path/query so {{markers}} and explicit escaping survive,
+	// but discard the edited authority as required by the fixed-origin contract.
+	authority := strings.Index(target, "://") + 3
+	offset := strings.IndexAny(target[authority:], "/?")
+	if offset < 0 {
+		return "/", nil
+	}
+	path := target[authority+offset:]
+	if path[0] == '?' {
+		path = "/" + path
+	}
+	return path, nil
 }
 
 func (t *Template) editableBody() []byte {

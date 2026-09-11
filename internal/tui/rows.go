@@ -2,7 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -38,7 +40,7 @@ func rowCode(f *capture.Flow) int {
 		return -1
 	}
 	n := 0
-	for _, r := range f.Response.Meta["status"] {
+	for _, r := range responseStatus(f.Response) {
 		if r < '0' || r > '9' {
 			break
 		}
@@ -122,7 +124,26 @@ func rowTitle(f *capture.Flow) string {
 			t += " [" + pl + "]"
 		}
 	}
-	return t
+	return inlineCaptureText(t)
+}
+
+// selectedFlowSummary retains identity that compact comparison rows may elide.
+// The caller owns its display bounds; detail renders this without truncation.
+func selectedFlowSummary(f *capture.Flow) string {
+	host := f.SNI
+	if host == "" {
+		host = f.ServerAddr
+	}
+	if f.Request != nil {
+		if requestHost := http.Header(f.Request.Headers).Get("Host"); requestHost != "" {
+			host = requestHost
+		}
+	}
+	return inlineCaptureText(string(f.Protocol)) + "  host " + inlineCaptureText(host) + "  " + rowTitle(f)
+}
+
+func inlineCaptureText(s string) string {
+	return strings.ReplaceAll(sanitizeExpandedText(s), "\n", `\n`)
 }
 
 // flagMark returns the one-cell marker for a row. The flag glyph is themeable
@@ -136,31 +157,34 @@ func flagMark(flagged bool) string {
 	return glyphFlag
 }
 
-// renderFlowRow formats one traffic-list row: flag mark, colored status code,
-// title (+ payload), and response size.
+// renderFlowRow reserves status, response size, and actual capture protocol
+// before spending remaining cells on the request target and attack payload.
 func (m Model) renderFlowRow(f *capture.Flow, selected bool, w int) string {
+	if w < 1 {
+		return ""
+	}
 	mark := flagMark(f.Flagged)
 	code := fmt.Sprintf("%-4s", codeText(f))
-	title := rowTitle(f)
 	size := humanSize(respSize(f))
-
+	if size == "" {
+		size = "—"
+	}
+	size = strings.Repeat(" ", max(0, 8-ansi.StringWidth(size))) + size
+	protocol := inlineCaptureText(string(f.Protocol))
+	protocol += strings.Repeat(" ", max(0, 9-ansi.StringWidth(protocol)))
+	prefix := mark + " " + code + " " + size + " " + protocol
+	titleWidth := w - ansi.StringWidth(prefix) - 1
+	title := ""
+	if titleWidth > 0 {
+		title = " " + ansi.Truncate(rowTitle(f), titleWidth, "…")
+	}
 	if selected {
-		// Plain text under a reverse highlight: embedding SGR colors here would
-		// terminate the reverse at the first reset and break the highlight.
-		plain := mark + " " + code + " " + title
-		if size != "" {
-			plain += "  " + size
-		}
-		return selectedStyle.Render(truncate(plain, w))
+		// Keep the reverse highlight intact; nested SGR resets would end it.
+		return selectedStyle.Render(ansi.Truncate(prefix+title, w, "…"))
 	}
-
-	mk := mark
 	if f.Flagged {
-		mk = flagStyle.Render(mark)
+		mark = flagStyle.Render(mark)
 	}
-	seg := mk + " " + codeStyle(f).Render(code) + " " + title
-	if size != "" {
-		seg += "  " + dimStyle.Render(size)
-	}
-	return ansi.Truncate(seg, w, "…")
+	row := mark + " " + codeStyle(f).Render(code) + " " + dimStyle.Render(size) + " " + protocol + title
+	return ansi.Truncate(row, w, "…")
 }

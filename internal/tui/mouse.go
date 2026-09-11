@@ -25,7 +25,7 @@ func (r rect) contains(x, y int) bool {
 // the two boxes sum to exactly m.width, at whatever splitRatio the operator has
 // dragged the divider to.
 func (m Model) paneRects() (left, right rect) {
-	boxH := m.height - 1 // the status bar owns the last row
+	boxH := m.height - m.chromeHeight()
 	leftBox, rightBox := m.paneBoxWidths()
 	left = rect{X: 0, Y: 0, W: leftBox, H: boxH}
 	right = rect{X: leftBox, Y: 0, W: rightBox, H: boxH}
@@ -61,8 +61,18 @@ func contentGrid(box rect) (cols, rows int) {
 //     the left pane stays inactive so its border cannot claim a focus that
 //     keyboard routing does not honor.
 func (m Model) onMouse(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.width == 0 {
+	if m.width < 60 || m.height < 16 {
 		return m, nil // nothing has been sized/drawn yet
+	}
+	if m.modalSuspended {
+		left, right := m.paneRects()
+		if left.contains(ev.X, ev.Y) {
+			return m.onLeftPaneMouse(ev, left)
+		}
+		if right.contains(ev.X, ev.Y) && ev.Action == tea.MouseActionPress && ev.Button == tea.MouseButtonLeft {
+			m.switchPane()
+		}
+		return m, nil
 	}
 	switch {
 	case m.showHelp:
@@ -331,8 +341,8 @@ func (m Model) wheelEditor(ev tea.MouseMsg) (tea.Model, tea.Cmd) {
 // renderTraffic and clickedFlowIndex both call this so the two can't disagree
 // about where a row lands on screen.
 func trafficRowLayout(h int, filterLineShown, cmdlineShown, pausedShown bool) (listTop, listRows int) {
-	listTop = 1 // header
-	reserved := 1
+	listTop = 1   // header
+	reserved := 2 // header and selected-flow summary
 	if filterLineShown {
 		listTop++
 		reserved++
@@ -345,8 +355,8 @@ func trafficRowLayout(h int, filterLineShown, cmdlineShown, pausedShown bool) (l
 		reserved += 2
 	}
 	listRows = h - reserved
-	if listRows < 1 {
-		listRows = 1
+	if listRows < 0 {
+		listRows = 0
 	}
 	return listTop, listRows
 }

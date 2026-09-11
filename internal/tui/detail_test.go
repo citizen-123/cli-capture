@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
 
@@ -34,22 +37,22 @@ func TestRenderFlowDetailHTTP(t *testing.T) {
 
 func TestBodyPreviewHexForBinary(t *testing.T) {
 	binary := []byte{0x00, 0x01, 0x02, 0xff, 0xfe, 0x80}
-	out := bodyPreview(binary, true)
+	out := bodyPreview(binary, 80, true)
 	if !strings.Contains(out, "00 01 02 ff fe 80") {
 		t.Errorf("binary body should hex-dump: %q", out)
 	}
 
 	text := []byte("plain readable text")
-	if got := bodyPreview(text, true); got != "plain readable text" {
+	if got := bodyPreview(text, 80, true); got != "plain readable text" {
 		t.Errorf("text body should render as-is, got %q", got)
 	}
 }
 
 func TestBodyPreviewEmpty(t *testing.T) {
-	if got := bodyPreview([]byte{}, true); got != "" {
+	if got := bodyPreview([]byte{}, 80, true); got != "" {
 		t.Errorf("empty body should render as empty, got %q", got)
 	}
-	if got := bodyPreview(nil, false); got != "" {
+	if got := bodyPreview(nil, 80, false); got != "" {
 		t.Errorf("nil body should render as empty, got %q", got)
 	}
 }
@@ -297,13 +300,11 @@ func TestColorizeJSONKeyVsStringValue(t *testing.T) {
 }
 
 func TestBodyPreviewTruncates(t *testing.T) {
-	big := make([]byte, 20000)
-	for i := range big {
-		big[i] = 'a'
-	}
-	out := bodyPreview(big, true)
-	if !strings.Contains(out, "20000 bytes total") {
-		t.Errorf("large body should note truncation: tail=%q", out[len(out)-40:])
+	body := bytes.Repeat([]byte("a"), 20000)
+	out := bodyPreview(body, 80, true)
+	if strings.Count(out, "a") >= len(body) || !strings.Contains(out, "11808 bytes omitted") ||
+		!strings.Contains(out, "20000 bytes total") || !strings.Contains(out, "export") {
+		t.Fatalf("preview must disclose its exact omission and full-content path: %q", out)
 	}
 }
 
@@ -336,5 +337,91 @@ func TestPrettyJSONLargeBodyWithManyEmbeddedStrings(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("large body expansion missing %q", want)
 		}
+	}
+}
+
+func TestDetailResponseStatusSeparateFromLifecycle(t *testing.T) {
+	for _, status := range []string{"404 Not Found", "500 Internal Server Error"} {
+		f := flowWithResp(status, 0)
+		f.Status = capture.StatusComplete
+		f.Err = errors.New("upstream closed after response")
+		out := ansi.Strip(renderFlowDetail(f, 80, true))
+		for _, want := range []string{"HTTP response: " + status, "lifecycle done", f.Err.Error()} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q in detail: %s", want, out)
+			}
+		}
+		f.Response.Meta = nil
+		f.Response.Summary = "HTTP/1.1 " + status
+		if out := ansi.Strip(renderFlowDetail(f, 80, true)); !strings.Contains(out, "HTTP response: "+status) {
+			t.Fatalf("summary-only capture lost response status: %s", out)
+		}
+	}
+}
+
+func TestDetailStreamingDirectionAndProvenance(t *testing.T) {
+	f := capture.NewFlow("client", "server")
+	f.Protocol = capture.ProtoWebSocket
+	f.Messages = []*capture.Message{
+		{Direction: capture.ClientToServer, Summary: "→ ws:text 4 B", Body: []byte("sent"), Meta: map[string]string{"injected": "true"}},
+		{Direction: capture.ServerToClient, Summary: "← ws:text 4 B", Body: []byte("echo")},
+	}
+	out := ansi.Strip(renderFlowDetail(f, 80, true))
+	if strings.Count(out, "→") != 1 || strings.Count(out, "←") != 1 || strings.Count(out, "[injected]") != 1 {
+		t.Fatalf("streaming identity duplicated or omitted: %s", out)
+	}
+	if !strings.Contains(out, "sent") || !strings.Contains(out, "echo") {
+		t.Fatalf("streaming payloads missing: %s", out)
+	}
+}
+
+func TestDetailRawExpandedSwitchPreservesCapture(t *testing.T) {
+	f := flowWithResp("200 OK", 0)
+	f.Response.Body = []byte(`{"nested":"{\"value\":42}","lines":"a\nb"}`)
+	f.Response.Raw = append([]byte("HTTP/1.1 200 OK\r\nX-Control: \x1b[2J\r\n\r\n"), f.Response.Body...)
+	body, raw := bytes.Clone(f.Response.Body), bytes.Clone(f.Response.Raw)
+	expanded := ansi.Strip(wrapDetail(f, 100, true))
+	literal := ansi.Strip(wrapDetail(f, 100, false))
+	if !strings.Contains(expanded, "expanded JSON") || strings.Contains(literal, "expanded JSON") {
+		t.Fatalf("mode did not change JSON representation:\nexpanded=%s\nraw=%s", expanded, literal)
+	}
+	if !strings.Contains(literal, "Captured serialized HTTP/1.1") ||
+		!strings.Contains(literal, `\x1B[2J`) || !strings.Contains(literal, string(body)) {
+		t.Fatalf("raw mode lost serialized data or safe controls: %s", literal)
+	}
+	if again := ansi.Strip(wrapDetail(f, 100, true)); again != expanded ||
+		!bytes.Equal(body, f.Response.Body) || !bytes.Equal(raw, f.Response.Raw) {
+		t.Fatal("switching representations mutated captured bytes or expanded output")
+	}
+	f.Response.Raw = nil
+	if fallback := ansi.Strip(renderFlowDetail(f, 100, false)); !strings.Contains(fallback, "Captured body fallback") || !strings.Contains(fallback, string(body)) {
+		t.Fatalf("missing explicitly labeled captured-body fallback: %s", fallback)
+	}
+}
+
+func TestDetailBinaryRowsFitNarrowWidths(t *testing.T) {
+	body := bytes.Repeat([]byte{0, 1, 0x80, 0xff}, 20)
+	for _, width := range []int{12, 17, 24, 36, 80} {
+		out := bodyPreview(body, width, true)
+		for _, row := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+			if ansi.StringWidth(row) > width {
+				t.Fatalf("hex row overflows %d cells: %q", width, row)
+			}
+			if strings.Contains(row, "|") && strings.Count(row, "|") != 2 {
+				t.Fatalf("ASCII column split from hex bytes: %q", row)
+			}
+		}
+	}
+}
+
+func TestDetailMessageLimitDisclosesOmittedCount(t *testing.T) {
+	f := capture.NewFlow("client", "server")
+	f.Protocol = capture.ProtoWebSocket
+	for range 302 {
+		f.Messages = append(f.Messages, &capture.Message{Summary: "ws:text", Body: []byte("payload")})
+	}
+	out := ansi.Strip(renderFlowDetail(f, 80, true))
+	if strings.Count(out, "payload") != 300 || !strings.Contains(out, "2 messages omitted (302 total)") || !strings.Contains(out, "export") {
+		t.Fatal("message preview did not bound content and disclose the full-content path")
 	}
 }

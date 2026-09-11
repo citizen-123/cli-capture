@@ -1,52 +1,51 @@
 # Exporting
 
-Everything is written to the config directory — `~/.cli-capture` by default, or
-whatever you passed to `-dir`.
+Exports use the data directory: `~/.cli-capture` by default, or the path from `-dir`. Theme and keybinding configuration use a separate directory.
 
 | What | Key | File |
 |---|---|---|
-| Session (all flows, JSON) | `Ctrl+A s` | `session.json` |
-| HAR 1.2 (all flows) | `Ctrl+A h` | `capture.har` |
-| Flagged flows, as text | `Ctrl+A f` | `flagged.txt` |
-| One flow, as text | `s` in the detail view | `flow-<id>.txt` |
-| One flow, as a curl command | `c` in the traffic list | `flow-<id>.curl` |
+| Session, all flows as JSON | `Ctrl+Space s` | `session.json` |
+| HAR 1.2, all flows | `Ctrl+Space h` | `capture.har` |
+| Flagged flows as text | `Ctrl+Space f` | `flagged.txt` |
+| One flow as text | `s` in detail | `flow-<id>.txt` |
+| One flow as a curl command | `c` in traffic | `flow-<id>.curl` |
 
-The status bar confirms each write with the path it used.
+The status area reports the output path. These keys are defaults. Help and footer hints reflect the effective configuration.
 
 ## curl
 
-`c` renders the selected flow's request as a runnable `curl` command — method,
-URL, every header, and the body — so you can take a request out of the capture
-and iterate on it in a normal shell.
+`c` writes the selected request as a runnable `curl` command with its method, URL, headers, and body.
 
 ![Export flow as curl](img/14-export-flow-command.png)
 
 ## HAR
 
-`Ctrl+A h` writes the whole capture as HAR 1.2, which browser devtools and most
-HTTP tooling can open directly.
+`Ctrl+Space h` writes the capture as HAR 1.2 for browser tools and other HTTP clients.
 
 ![Export session as HAR](img/15-export-har.png)
 
 ## Sessions
 
-`Ctrl+A s` saves every captured flow as indented JSON, and `-load` reads one
-back into the flow list at startup:
+`Ctrl+Space s` saves every captured flow as JSON. `-load` restores those rows immediately, before new traffic arrives:
 
 ```bash
 cli-capture -load ~/.cli-capture/session.json -- some-cli
 ```
 
-Flags survive the round trip, so you can triage a long capture across several
-sittings. Loaded flows are ordinary rows: view, filter, sort, export, and
-resend them like anything you just captured.
+Loaded rows support detail, navigation, filters, flags, sorting, export, and resend. Flags survive the save/load cycle.
+
+Session JSON retains complete stored bodies and raw bytes, regardless of terminal preview limits. This includes binary data that text export represents only by size.
+
+WebSocket session entries retain direction, opcode, timestamp, payload bytes, and injection metadata. Successful injections appear once. Failed injection attempts do not create successful message entries.
+
+## Text and display limits
+
+The detail view supports expanded and raw previews. A limit notice identifies abbreviated terminal content. The preview does not change stored data or export limits.
+
+Text export includes decoded text bodies and WebSocket direction, timestamp, and injection provenance. Binary bodies use a byte-count description. For complete stored binary content, use session JSON.
 
 ## These files are secrets
 
-Exports are **verbatim**. That means every `Authorization` header, every
-cookie, every session token, and every request body — including an app's system
-prompt, if that's what it was sending. HAR and session files carry the full
-set; the curl and text exports carry whatever was in that flow.
+CAUTION: Review exports before you share them. Export does not redact credentials, cookies, tokens, or request bodies.
 
-Nothing is redacted on the way out. Treat the config directory as sensitive:
-don't paste these into an issue, and check what's in one before sharing it.
+Treat the data directory as sensitive. Session JSON and HAR contain captured content beyond the visible terminal preview.

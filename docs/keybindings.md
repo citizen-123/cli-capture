@@ -1,34 +1,40 @@
 # Keybindings
 
-The left pane is a real terminal, so cli-capture can't take plain keys for
-itself — the target needs them. It uses a **tmux-style leader**: `Ctrl+A`, then
-a command key. Everything else goes straight through to the target. Press
-`Ctrl+A` twice to send a literal `Ctrl+A`.
+The terminal pane forwards ordinary keys to the target. The global leader is
+**`Ctrl+Space`**, followed by a command key. The leader works in every view,
+including editors, prompts, Repeater, and help.
 
-Every binding below is a default. The leader and any key can be rebound — see
-[configuration](configuration.md#keybindings).
+Press the leader twice to send its literal byte to the terminal. Other views
+consume the repeated leader without inserting text. Escape cancels a pending
+leader. An unknown command key does not reach the target or change a draft.
 
-Press **`?`** for this reference in-app:
+Every binding below is a default. See [configuration](configuration.md#keybindings)
+for overrides. Footer hints and help show the effective bindings.
+
+Press **`Ctrl+Space ?`** for help from any view. Plain `?` opens help in the traffic list:
 
 ![Help overlay](img/13-help-overlay.png)
 
-## Global — `Ctrl+A`, then:
+## Global — `Ctrl+Space`, then:
 
 | Key | Action |
 |---|---|
 | `w` | switch pane (terminal ⇄ traffic) |
 | `<` / `>` | resize the split: shrink / grow the left pane |
 | `i` / `r` | toggle intercept: requests / responses |
+| `p` | inspect the held message, or return to the previous view |
+| `c` | cancel the active resend or Repeater job |
 | `s` | save session to JSON |
 | `h` | export session as HAR |
 | `f` | export flagged flows → `flagged.txt` |
+| `m` | toggle mouse capture |
 | `?` | toggle help |
 | `q` | quit |
-| `Ctrl+A` | send a literal `Ctrl+A` to the target |
+| `Ctrl+Space` | send a literal NUL byte to the target, from the terminal pane only |
 
 ## Terminal pane (left)
 
-Every keystroke is forwarded to the target verbatim. Only the leader is caught.
+Ordinary keys reach the target unchanged, including `Ctrl+A`. Only the configured leader is reserved.
 
 ## Traffic pane (right)
 
@@ -45,8 +51,8 @@ Plain keys — no leader needed, because this pane never forwards to the target.
 | `}` / `{` | jump to the next / previous host in the list |
 | `enter` | open the detail view |
 | `i` / `r` | toggle intercept: requests / responses (same as the leader form) |
-| `e` / `f` / `d` | on a **PAUSED** flow: edit / forward / drop |
-| `x` | resend the selected flow to its origin |
+| `e` / `f` / `d` | edit / forward / drop the **active held message**, not the selected row |
+| `x` | start an asynchronous resend to the selected origin |
 | `R` | open the flow in the [Repeater](repeater.md) |
 | `c` | export the selected flow as a curl command |
 | `n` / `N` | inject a WebSocket frame (client→server / server→client) |
@@ -99,6 +105,7 @@ same code as its key, so `:curl` and `c` do exactly the same thing.
 | `:flagged` | show only flagged flows, same as `F` (`:only`) |
 | `:curl` | write the selected flow to `flow-<id>.curl` |
 | `:resend` | resend the selected flow |
+| `:cancel` | cancel the active resend or Repeater job |
 | `:flag` | toggle the flag on the selected flow |
 | `:w` | save the session (`:write`, `:save`) |
 | `:help` | open the help overlay |
@@ -122,9 +129,8 @@ names in the in-app help overlay:
 > flow** to its origin, `h` under the leader exports HAR, and `y` is unbound.
 > `:f` and `f` do different things.
 
-`enter` runs the command, `esc` cancels, `ctrl+q` quits from the command line as
-it does everywhere else. Unknown commands report in the status bar rather than
-silently doing nothing.
+Enter runs the command. Escape cancels it. Global leader commands remain
+available in the prompt. Unknown commands report an error in the status area.
 
 `:flagged` toggles the *view*, matching the plain-English reading and the `F`
 key. Writing flagged request and response bodies to `flagged.txt` — credentials
@@ -138,17 +144,24 @@ Commands stay available even when the equivalent key has been unbound in
 
 | Key | Action |
 |---|---|
-| `j` / `k` | scroll |
+| `j` / `k`, arrows, page keys, mouse wheel | scroll |
+| `v` | switch expanded and raw stored representations |
 | `s` | save this flow to a `.txt` file |
 | `esc` / `q` | back to the list |
+
+The detail header separates HTTP response status from capture lifecycle.
+Representation limits are explicit. The view rewraps after a resize and retains
+the scroll position, including a bottom anchor. Session JSON retains complete
+stored bytes even when the terminal preview is abbreviated.
 
 ## Editor (while [intercepting](intercepting.md))
 
 | Key | Action |
 |---|---|
-| `Ctrl+S` | forward / send the edited bytes |
-| `Ctrl+L` | fix `Content-Length` to match the body |
-| `esc` | cancel |
+| `Ctrl+S` | forward / send the edited message |
+| `Ctrl+L` | repair HTTP/1 `Content-Length` from the body byte count |
+| `Ctrl+R` | clear the retained body for explicit text replacement |
+| `esc` | close the editor and leave the message held |
 
 ## Repeater (`R`)
 
@@ -156,12 +169,21 @@ Commands stay available even when the equivalent key has been unbound in
 |---|---|
 | `Tab` | cycle focus: request → payloads → response |
 | `Ctrl+O` | cycle attack mode: single / sniper / battering-ram / pitchfork / cluster-bomb |
-| `Ctrl+S` | send (single) or run the attack |
-| `esc` | close |
+| `Ctrl+S` | start a single request or attack job |
+| `Ctrl+R` | clear the retained body for explicit text replacement |
+| `esc` | close the view without canceling its job |
+
+Pane switches and help preserve modal drafts and focus. The global
+`Ctrl+Space c` cancellation command remains available after the Repeater closes.
 
 ## The status bar
 
-The left chip shows interception state: **`monitor`** while nothing is armed,
-and **`req:on resp:off`** (or any combination) once it is. The rest of the bar
-is the last action's result — where a file was written, how many flows were
-saved, whether a flow was forwarded or dropped.
+The chrome identifies keyboard focus, interception state, and effective global
+help. The action result uses a bounded row and cannot expand the terminal frame.
+
+A separate held-message row identifies direction, flow, pause identity, and
+queued count. Its target can differ from the selected traffic row. A job row
+shows manual-request progress and cancellation even outside the Repeater.
+
+At narrow sizes, status and byte-count columns take priority over request text.
+Below 60 columns or 16 rows, the interface displays a bounded resize notice.

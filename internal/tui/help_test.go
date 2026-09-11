@@ -266,7 +266,7 @@ func TestHelpKeysScroll(t *testing.T) {
 		t.Errorf("j left helpScroll = %d, want 1", next.(Model).helpScroll)
 	}
 	next, _ = m.onHelpKey(key("G"))
-	if got, want := next.(Model).helpScroll, m.maxHelpScroll(30); got != want {
+	if got, want := next.(Model).helpScroll, m.maxHelpScroll(30-m.chromeHeight()); got != want {
 		t.Errorf("G left helpScroll = %d, want %d", got, want)
 	}
 	// k at the top must not go negative.

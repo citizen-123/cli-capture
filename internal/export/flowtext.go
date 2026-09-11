@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
@@ -34,7 +35,15 @@ func FlowText(f *capture.Flow) string {
 	if len(f.Messages) > 0 {
 		fmt.Fprintf(&b, "\n--- MESSAGES (%d) ---\n", len(f.Messages))
 		for _, m := range f.Messages {
-			fmt.Fprintf(&b, "%s %s\n", m.Direction, m.Summary)
+			direction := m.Direction.String()
+			fmt.Fprintf(&b, "%s %s", direction, strings.TrimPrefix(m.Summary, direction+" "))
+			if !m.Timestamp.IsZero() {
+				fmt.Fprintf(&b, " %s", m.Timestamp.Format(time.RFC3339Nano))
+			}
+			if m.Meta["injected"] == "true" {
+				b.WriteString(" [injected]")
+			}
+			b.WriteString("\n")
 			if len(m.Body) > 0 {
 				b.WriteString(indentText(bodyText(m.Body), "  "))
 				b.WriteString("\n")

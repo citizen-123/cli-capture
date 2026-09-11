@@ -141,10 +141,22 @@ draws (an empty string removes the glyph entirely):
 
 ## Keybindings
 
-`"leader"` sets the prefix key. It must be a ctrl key — `ctrl+a` through
-`ctrl+z`, excluding `ctrl+i` and `ctrl+m` (terminals send those as Tab and
-Enter). The default `ctrl+a` collides with tmux's own leader and with
-readline's start-of-line, so `ctrl+b` or `ctrl+g` are worth considering:
+`"leader"` sets the global prefix key. The default is **`ctrl+space`**.
+Terminals normally encode Ctrl+Space as NUL. `ctrl+@` is the equivalent key name.
+The interface displays the canonical name **Ctrl+Space**.
+
+Ctrl+A now reaches the target unchanged. An explicit `ctrl+a` configuration
+retains the old leader behavior.
+
+If the terminal or multiplexer captures Ctrl+Space, select another leader.
+The accepted alternatives are `ctrl+a` through `ctrl+z`, except Tab (`ctrl+i`)
+and Enter (`ctrl+m`). The `-leader` flag overrides the configuration file:
+
+```bash
+cli-capture -leader ctrl+a -- some-cli
+```
+
+For a persistent alternative:
 
 ```json
 {"keys": {"leader": "ctrl+g"}}
@@ -161,11 +173,11 @@ Key names are the ones the help overlay shows: single characters, `enter`,
 
 | Context | Actions |
 |---|---|
-| `leader` | `pane.switch` `split.shrink` `split.grow` `intercept.requests` `intercept.responses` `session.save` `export.har` `export.flagged` `help.toggle` `app.quit` |
+| `leader` | `pane.switch` `split.shrink` `split.grow` `mouse.capture` `intercept.requests` `intercept.responses` `pause.inspect` `job.cancel` `session.save` `export.har` `export.flagged` `help.toggle` `app.quit` |
 | `traffic` | `flow.prev` `flow.next` `flow.host-next` `flow.host-prev` `flow.flag` `flow.flagged-only` `flow.sort` `flow.filter` `flow.command` `flow.detail` `flow.resend` `repeater.open` `export.curl` `paused.edit` `paused.forward` `paused.drop` `ws.inject.client` `ws.inject.server` `intercept.requests` `intercept.responses` `help.toggle` |
-| `detail` | `detail.save` `detail.close` |
-| `editor` | `editor.send` `editor.fix-length` `editor.cancel` |
-| `repeater` | `repeater.cycle-focus` `repeater.cycle-mode` `repeater.send` `repeater.close` |
+| `detail` | `detail.save` `detail.toggle-format` `detail.close` |
+| `editor` | `editor.send` `editor.fix-length` `editor.replace-body` `editor.cancel` `app.quit` |
+| `repeater` | `repeater.cycle-focus` `repeater.cycle-mode` `repeater.send` `editor.replace-body` `repeater.close` `app.quit` |
 
 The `?` overlay is generated from your live keymap, so it always shows what's
 actually bound — rebind a key and the help follows. Vim motions are prefixes and
@@ -175,9 +187,12 @@ effective traffic bindings. The `:` command table appears only while
 available, while fully unbinding it removes the inaccessible commands. See
 [keybindings](keybindings.md).
 
-Two things are rejected rather than silently ignored: an action bound in a
-context that doesn't have it, and binding the leader key inside another context
-(the leader is consumed first, so that binding could never fire).
+The leader dispatches before all modal input. Pane switches and help preserve
+the current draft. Effective bindings appear in help and local hints.
+
+Startup rejects actions in unsupported contexts and keys that collide with the
+leader. This includes terminal aliases and default editor or Repeater bindings.
+To use such a key as the leader, first unbind the conflicting action.
 
 ### Example: rebinding list movement
 

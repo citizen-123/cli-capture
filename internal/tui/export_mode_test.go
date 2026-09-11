@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -79,5 +80,39 @@ func TestExportsNarrowPreexistingFiles(t *testing.T) {
 				t.Error("export did not replace stale contents")
 			}
 		})
+	}
+}
+
+func TestDetailModesLeaveFullTextExportUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	m, flow := privateExportModel(dir)
+	flow.Response.Body = append(bytes.Repeat([]byte("body-"), 3000), []byte("BODY-END")...)
+	flow.Response.Raw = append([]byte("HTTP/1.1 200 OK\r\n\r\n"), flow.Response.Body...)
+	for range 301 {
+		flow.Messages = append(flow.Messages, &capture.Message{Summary: "ws:text", Body: []byte("stream payload")})
+	}
+	flow.Messages = append(flow.Messages, &capture.Message{Summary: "ws:text", Body: []byte("LAST-MESSAGE")})
+	path := filepath.Join(dir, "flow-"+flow.ID+".txt")
+	readExport := func() []byte {
+		t.Helper()
+		m.exportViewedFlow()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	before := readExport()
+	if !bytes.Contains(before, flow.Response.Body) || !bytes.Contains(before, []byte("LAST-MESSAGE")) {
+		t.Fatal("full text export omitted stored content beyond preview caps")
+	}
+	for _, expanded := range []bool{true, false, true} {
+		view := wrapDetail(flow, 40, expanded)
+		if strings.Contains(view, "BODY-END") || strings.Contains(view, "LAST-MESSAGE") {
+			t.Fatal("fixture did not exercise bounded inspection previews")
+		}
+		if after := readExport(); !bytes.Equal(after, before) {
+			t.Fatal("display mode changed the subsequent full text export")
+		}
 	}
 }

@@ -95,7 +95,9 @@ var commands = []command{
 	{name: "curl", aliases: []string{"y"}, desc: "write the selected flow to a .curl file",
 		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.exportCurlSelected(); return m, nil }},
 	{name: "resend", aliases: []string{"x"}, desc: "resend the selected flow",
-		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.resendSelected(); return m, nil }},
+		run: func(m Model, _ string) (Model, tea.Cmd) { cmd := m.startResend(); m.sizeOverlays(); return m, cmd }},
+	{name: "cancel", desc: "cancel the active resend or attack",
+		run: func(m Model, _ string) (Model, tea.Cmd) { m.cancelJob(); m.sizeOverlays(); return m, nil }},
 	{name: "flag", desc: "toggle the flag on the selected flow",
 		run: func(m Model, _ string) (Model, tea.Cmd) {
 			m.status = m.toggleSelectedFlag()
@@ -104,9 +106,9 @@ var commands = []command{
 	{name: "w", aliases: []string{"write", "save"}, desc: "save the session",
 		run: func(m Model, _ string) (Model, tea.Cmd) { m.status = m.saveSession(); return m, nil }},
 	{name: "help", aliases: []string{"h"}, desc: "this overlay",
-		run: func(m Model, _ string) (Model, tea.Cmd) { m.showHelp, m.helpScroll = true, 0; return m, nil }},
+		run: func(m Model, _ string) (Model, tea.Cmd) { m.toggleHelp(); return m, nil }},
 	{name: "q", aliases: []string{"quit"}, desc: "quit",
-		run: func(m Model, _ string) (Model, tea.Cmd) { return m, tea.Quit }},
+		run: func(m Model, _ string) (Model, tea.Cmd) { m.cancelJob(); return m, tea.Quit }},
 }
 
 // lookupCommand resolves a typed name against the table's names and aliases.
@@ -139,8 +141,7 @@ func newCommandLine() textinput.Model {
 func (m Model) onCmdKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.Type {
 	case tea.KeyCtrlQ:
-		// Every other modal honours ctrl+q; a text input that swallowed it would
-		// be the one place in the app where the quit key does nothing.
+		m.cancelJob()
 		return m, tea.Quit
 	case tea.KeyEnter:
 		line := strings.TrimSpace(m.ci.Value())

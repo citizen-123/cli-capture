@@ -170,9 +170,6 @@ func TestPauseQueuePromotesFIFOAndResolvesMatchingFlows(t *testing.T) {
 	if h.model.paused != nil || h.model.pausedMsg != nil || h.model.pausedToken != 0 || len(h.model.pauseQueue) != 0 {
 		t.Fatal("pause state was not empty after resolving the queue")
 	}
-	if h.model.status != "forwarded (edited)" {
-		t.Fatalf("final status = %q, want edited-forward completion", h.model.status)
-	}
 }
 
 func TestPauseQueueResolvesConcurrentSameFlowPausesOutOfOrder(t *testing.T) {
@@ -257,26 +254,22 @@ func TestPauseQueueResolvesConcurrentSameFlowPausesOutOfOrder(t *testing.T) {
 	}
 }
 
-func TestPauseActivationClearsPendingLeaderBeforeShortcut(t *testing.T) {
+func TestPauseArrivalPreservesPendingLeader(t *testing.T) {
 	h := newPauseModelHarness(t)
 	item, result := h.startPause(t, "leader", "body")
-
 	h.model = pauseKey(t, h.model, tea.KeyMsg{Type: h.model.km().Leader})
-	if !h.model.pendingLeader {
-		t.Fatal("test setup did not enter the leader-key state")
-	}
 	h.notify(item)
-	if h.model.pendingLeader {
-		t.Fatal("pause activation left a stale leader key pending")
+	if !h.model.pendingLeader {
+		t.Fatal("pause arrival consumed the operator's leader")
 	}
-
-	// Exercise the production Update path: the prompt's plain f must resolve the
-	// pause, not dispatch leader-f (export flagged).
+	h.model = pauseKey(t, h.model, key("f"))
+	select {
+	case <-result:
+		t.Fatal("global export command resolved the held message")
+	default:
+	}
 	h.model = pauseKey(t, h.model, key("f"))
 	if got := awaitPauseOutcome(t, "leader", result); got.drop || got.body != nil {
-		t.Fatalf("resolution = {drop:%v body:%q}, want unchanged forward", got.drop, got.body)
-	}
-	if h.model.paused != nil || h.model.status != "forwarded" {
-		t.Fatalf("pause shortcut did not complete: active=%v status=%q", h.model.paused, h.model.status)
+		t.Fatalf("resolution = %#v", got)
 	}
 }

@@ -3,6 +3,7 @@ package replay
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,10 +12,52 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
+
+func TestResendCancelsHeldResponse(t *testing.T) {
+	started, disconnected := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(disconnected)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		flow *capture.Flow
+		err  error
+	}
+	results := make(chan result, 1)
+	go func() {
+		flow, err := Resend(ctx, replayResponseTestFlow(strings.TrimPrefix(server.URL, "http://")))
+		results <- result{flow, err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("request did not reach server")
+	}
+	cancel()
+	select {
+	case got := <-results:
+		if !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("Resend error = %v, want cancellation", got.err)
+		}
+		assertReplayResponseFailure(t, got.flow, got.err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("resend remained blocked after cancellation")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("origin request was not canceled")
+	}
+}
 
 func TestResendHTTP(t *testing.T) {
 	var gotMethod, gotPath, gotHeader string
@@ -34,7 +77,7 @@ func TestResendHTTP(t *testing.T) {
 		Body:    []byte("payload"),
 	}
 
-	nf, err := Resend(f)
+	nf, err := Resend(context.Background(), f)
 	if err != nil {
 		t.Fatalf("Resend: %v", err)
 	}
@@ -53,7 +96,7 @@ func TestResendRejectsNonHTTP(t *testing.T) {
 	f := capture.NewFlow("c", "x:1")
 	f.Protocol = capture.ProtoRawTCP
 	f.Request = &capture.Message{Meta: map[string]string{}}
-	if _, err := Resend(f); err == nil {
+	if _, err := Resend(context.Background(), f); err == nil {
 		t.Error("expected raw-TCP resend to be rejected")
 	}
 }
@@ -92,7 +135,7 @@ func TestResendReencodesCapturedGzipBody(t *testing.T) {
 		Meta:    map[string]string{"method": "POST", "path": "/gzip"},
 	}
 
-	if _, err := Resend(f); err != nil {
+	if _, err := Resend(context.Background(), f); err != nil {
 		t.Fatalf("Resend: %v", err)
 	}
 	if decodeErr != nil {
@@ -157,7 +200,7 @@ func TestResendFramesCapturedGRPCMessages(t *testing.T) {
 			}
 			f.Messages = tt.messages
 
-			replayed, err := Resend(f)
+			replayed, err := Resend(context.Background(), f)
 			if err != nil {
 				t.Fatalf("Resend: %v", err)
 			}
@@ -196,7 +239,7 @@ func TestResendDechunksCapturedHTTP1Body(t *testing.T) {
 		Meta: map[string]string{"method": "POST", "path": "/chunked"},
 	}
 
-	if _, err := Resend(f); err != nil {
+	if _, err := Resend(context.Background(), f); err != nil {
 		t.Fatalf("Resend: %v", err)
 	}
 	if string(got) != "payload" {
@@ -236,7 +279,7 @@ func TestResendAppliesRepeatedContentEncodingsInOrder(t *testing.T) {
 		Meta:    map[string]string{"method": "POST", "path": "/chain"},
 	}
 
-	if _, err := Resend(f); err != nil {
+	if _, err := Resend(context.Background(), f); err != nil {
 		t.Fatalf("Resend: %v", err)
 	}
 	if decodeErr != nil {
@@ -254,7 +297,7 @@ func TestResendRejectsTruncatedResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	flow, err := Resend(replayResponseTestFlow(strings.TrimPrefix(srv.URL, "http://")))
+	flow, err := Resend(context.Background(), replayResponseTestFlow(strings.TrimPrefix(srv.URL, "http://")))
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("Resend error = %v, want unexpected EOF", err)
 	}
@@ -279,7 +322,7 @@ func TestResendRejectsResponseReadFailureAndClosesBody(t *testing.T) {
 		}, nil
 	})}
 
-	flow, err := Resend(replayResponseTestFlow("example.test"))
+	flow, err := Resend(context.Background(), replayResponseTestFlow("example.test"))
 	if !errors.Is(err, readErr) {
 		t.Fatalf("Resend error = %v, want %v", err, readErr)
 	}
@@ -305,7 +348,7 @@ func TestResendRetainsCompleteResponseWhenCloseFails(t *testing.T) {
 		}, nil
 	})}
 
-	flow, err := Resend(replayResponseTestFlow("example.test"))
+	flow, err := Resend(context.Background(), replayResponseTestFlow("example.test"))
 	if err != nil {
 		t.Fatalf("Resend error = %v, want nil", err)
 	}
