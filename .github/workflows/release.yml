@@ -83,6 +83,15 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
 
+
+      - name: Check Homebrew publishing token
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_GITHUB_TOKEN" ]; then
+            echo "::error::Set HOMEBREW_TAP_GITHUB_TOKEN with Contents write access to citizen-123/homebrew-tap before releasing."
+            exit 1
+          fi
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -92,9 +101,9 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: "~> v2"
+          version: "v2.18.1"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Token that can push the formula to citizen-123/homebrew-tap.
+          # Token that can push the generated cask to citizen-123/homebrew-tap.
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

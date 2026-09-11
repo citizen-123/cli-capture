@@ -16,8 +16,9 @@ traffic streams into the list on the right.
 
 ![Split-pane monitor](img/01-overview-split-pane.png)
 
-Press **`?`** at any time for the keybinding overlay, and **`Ctrl+A q`** to
-quit. The leader is `Ctrl+A` — see [keybindings](keybindings.md).
+Press **`Ctrl+Space ?`** for help from any view. Press **`Ctrl+Space q`** to quit.
+Ctrl+A remains available to the target. If your terminal captures Ctrl+Space,
+use `-leader ctrl+g`. See [keybindings](keybindings.md).
 
 ## Capture a whole shell session
 
@@ -83,10 +84,15 @@ TLS is decrypted by minting a leaf certificate per SNI, signed by that CA. Use
 
 ## Reading a flow
 
-`j`/`k` moves the selection, **`enter`** opens the detail view. Request and
-response headers are shown in full; JSON bodies are pretty-printed and
-syntax-highlighted; binary falls back to a hex dump. `j`/`k` scrolls, `esc`
-goes back.
+Press `Ctrl+Space w` to focus traffic. Use `j`/`k` to select a flow.
+Press Enter to open its detail view.
+
+The header separates HTTP response status from capture lifecycle. Expanded view
+decodes compressed bodies, formats JSON, and uses a hex display for binary data.
+Press `v` for raw stored content. Press Escape to return.
+
+The view rewraps after a resize and preserves its scroll position. Preview
+limits appear explicitly. Session JSON retains the complete stored bytes.
 
 ![Flow detail with JSON highlighting](img/02-flow-detail-json.png)
 
@@ -114,8 +120,7 @@ Filter first to find a shape of request:
 
 ![Filter by path](img/05-filter-by-path.png)
 
-Flag the interesting ones as you go — flags survive a session save/load
-round-trip, and `Ctrl+A f` exports just the flagged set:
+Flags survive a session save/load cycle. `Ctrl+Space f` exports the flagged set:
 
 ![Flagged flows](img/06-flag-flows.png)
 
@@ -129,25 +134,29 @@ one returned 200 bytes:
 
 ![Sort by size](img/08-sort-by-size.png)
 
-Each row carries the status code (colored by class), the response size, and the
-protocol, so most triage happens without opening anything.
+Rows retain status, response size, and protocol before clipping request text.
+The selected summary identifies the row. Detail shows the complete target.
+Empty-state messages distinguish no capture, no filter matches, and no flagged flows.
 
 ## Where files land
 
-Everything goes in the config directory — `~/.cli-capture` by default, or
-whatever you pass to `-dir`:
+Captured data goes in `~/.cli-capture` by default, or the path from `-dir`.
+Theme and keybinding configuration use a separate [configuration directory](configuration.md).
 
 | File | Written by |
 |---|---|
 | `ca.pem` | first run (the MITM CA) |
 | `cli-capture.log` | every run — the TUI owns the screen, so logs go here |
-| `session.json` | `Ctrl+A s`, reload with `-load` |
-| `capture.har` | `Ctrl+A h` |
-| `flagged.txt` | `Ctrl+A f` |
+| `session.json` | `Ctrl+Space s`, reload with `-load` |
+| `capture.har` | `Ctrl+Space h` |
+| `flagged.txt` | `Ctrl+Space f` |
 | `flow-<id>.txt` | `s` in the detail view |
 | `flow-<id>.curl` | `c` in the traffic list |
 
 See [exporting](exporting.md) for what each format contains.
+
+Loaded sessions appear immediately, before new traffic arrives. Their rows
+support navigation, filtering, sorting, flags, detail, export, and resend.
 
 ## When nothing shows up
 

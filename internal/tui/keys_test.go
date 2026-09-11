@@ -176,25 +176,24 @@ func TestOnKeyForwardsTerminalKeyBytesToPTY(t *testing.T) {
 
 	var want []byte
 	for _, test := range tests {
-		next, _ := m.onKey(test.msg)
+		next, _ := m.Update(test.msg)
 		m = next.(Model)
 		want = append(want, test.want...)
 	}
 
-	// Alt+leader after a plain leader is data, not the double-leader escape.
-	next, _ := m.onKey(tea.KeyMsg{Type: tea.KeyCtrlB})
+	// An unbound modified second key cancels the prefix without leaking bytes.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
 	m = next.(Model)
-	next, _ = m.onKey(tea.KeyMsg{Type: tea.KeyCtrlB, Alt: true})
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB, Alt: true})
 	m = next.(Model)
-	want = append(want, "\x1b\x02"...)
 	if m.pendingLeader {
 		t.Fatal("alt+leader left the model waiting for a leader command")
 	}
 
 	// An exact, unmodified double leader still sends one literal leader byte.
-	next, _ = m.onKey(tea.KeyMsg{Type: tea.KeyCtrlB})
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
 	m = next.(Model)
-	next, _ = m.onKey(tea.KeyMsg{Type: tea.KeyCtrlB})
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
 	m = next.(Model)
 	want = append(want, '\x02')
 	if m.pendingLeader {
@@ -202,7 +201,7 @@ func TestOnKeyForwardsTerminalKeyBytesToPTY(t *testing.T) {
 	}
 
 	// The configured leader remains UI input and must not reach the PTY.
-	next, _ = m.onKey(tea.KeyMsg{Type: tea.KeyCtrlB})
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
 	m = next.(Model)
 	if !m.pendingLeader {
 		t.Fatal("leader was not consumed by the model")

@@ -3,6 +3,7 @@ package protocol
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -12,6 +13,9 @@ import (
 	"time"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
+	"github.com/citizen-123/cli-capture/internal/export"
+	"github.com/citizen-123/cli-capture/internal/intercept"
+	"github.com/citizen-123/cli-capture/internal/scope"
 )
 
 // upperTamper edits every client→server payload to upper-case, to prove the
@@ -41,9 +45,8 @@ func TestPumpWSCapturesAndTampers(t *testing.T) {
 	src := bufio.NewReadWriter(bufio.NewReader(&srcBytes), bufio.NewWriter(&bytes.Buffer{}))
 	// client→server pump writes to the session's server peer.
 	serverRW := bufio.NewReadWriter(bufio.NewReader(&bytes.Buffer{}), bufio.NewWriter(&dstBytes))
-	session := &wsSession{client: src, server: serverRW}
-
 	flow := capture.NewFlow("c", "s:443")
+	session := &wsSession{client: src, server: serverRW, flow: flow}
 	pumpWS(session, src, flow, capture.ClientToServer, upperTamper{}, func() {})
 
 	// Recorded message is the ORIGINAL payload.
@@ -68,12 +71,17 @@ func TestSessionInject(t *testing.T) {
 	var toServer, toClient bytes.Buffer
 	server := bufio.NewReadWriter(bufio.NewReader(&bytes.Buffer{}), bufio.NewWriter(&toServer))
 	client := bufio.NewReadWriter(bufio.NewReader(&bytes.Buffer{}), bufio.NewWriter(&toClient))
-	s := &wsSession{client: client, server: server}
+	flow := capture.NewFlow("c", "s:443")
+	flow.Protocol = capture.ProtoWebSocket
+	notifications := 0
+	s := &wsSession{client: client, server: server, flow: flow, touch: func() { notifications++ }}
 
 	// client→server injection is masked and lands on the server peer.
-	if err := s.Inject(capture.ClientToServer, WSText, []byte("hi")); err != nil {
+	payload := []byte("hi")
+	if err := s.Inject(capture.ClientToServer, WSText, payload); err != nil {
 		t.Fatal(err)
 	}
+	payload[0] = 'x' // The caller must not retain ownership of captured bytes.
 	fr, err := readWSFrame(bufio.NewReader(&toServer))
 	if err != nil {
 		t.Fatal(err)
@@ -83,15 +91,416 @@ func TestSessionInject(t *testing.T) {
 	}
 
 	// server→client injection is unmasked and lands on the client peer.
-	if err := s.Inject(capture.ServerToClient, WSText, []byte("yo")); err != nil {
+	if err := s.Inject(capture.ServerToClient, WSBinary, []byte("yo\x00\xff")); err != nil {
 		t.Fatal(err)
 	}
 	fr2, err := readWSFrame(bufio.NewReader(&toClient))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fr2.Masked || string(fr2.Payload) != "yo" {
+	if fr2.Masked || fr2.Opcode != opBinary || string(fr2.Payload) != "yo\x00\xff" {
 		t.Errorf("s2c inject: masked=%v payload=%q", fr2.Masked, fr2.Payload)
+	}
+
+	// An echo is an ordinary incoming message, not another injected entry.
+	echo := bufio.NewReadWriter(
+		bufio.NewReader(bytes.NewReader((&wsFrame{Fin: true, Opcode: opText, Payload: []byte("hi")}).encode())),
+		bufio.NewWriter(io.Discard),
+	)
+	pumpWS(s, echo, flow, capture.ServerToClient, nil, func() {})
+	if len(flow.Messages) != 3 || notifications != 3 {
+		t.Fatalf("messages=%d notifications=%d, want one per delivered frame", len(flow.Messages), notifications)
+	}
+	for i, want := range []struct {
+		dir      capture.Direction
+		payload  string
+		injected string
+		opcode   string
+	}{
+		{capture.ClientToServer, "hi", "true", "text"},
+		{capture.ServerToClient, "yo\x00\xff", "true", "binary"},
+		{capture.ServerToClient, "hi", "", "text"},
+	} {
+		msg := flow.Messages[i]
+		if msg.Direction != want.dir || string(msg.Body) != want.payload || string(msg.Raw) != want.payload ||
+			msg.Meta["opcode"] != want.opcode || msg.Meta["injected"] != want.injected || msg.Timestamp.IsZero() {
+			t.Errorf("message %d = %+v", i, msg)
+		}
+	}
+	var saved bytes.Buffer
+	if err := capture.Save(&saved, []*capture.Flow{flow}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := capture.Load(&saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded) != 1 || len(reloaded[0].Messages) != 3 {
+		t.Fatalf("reloaded captures = %+v", reloaded)
+	}
+	for i, msg := range reloaded[0].Messages {
+		original := flow.Messages[i]
+		if msg.Direction != original.Direction || !bytes.Equal(msg.Body, original.Body) ||
+			!bytes.Equal(msg.Raw, original.Raw) || !msg.Timestamp.Equal(original.Timestamp) ||
+			msg.Meta["opcode"] != original.Meta["opcode"] || msg.Meta["injected"] != original.Meta["injected"] {
+			t.Errorf("roundtrip changed message %d: %+v", i, msg)
+		}
+	}
+	text := export.FlowText(reloaded[0])
+	if strings.Count(text, "[injected]") != 2 || !strings.Contains(text, "hi") || !strings.Contains(text, "ws:binary") {
+		t.Fatalf("text export lost injection history:\n%s", text)
+	}
+}
+
+type registeredWSTamper struct {
+	*intercept.Engine
+	registered chan capture.Injector
+}
+
+func (w *registeredWSTamper) RegisterSession(id string, injector capture.Injector) {
+	w.Engine.RegisterSession(id, injector)
+	w.registered <- injector
+}
+
+type liveWebSocket struct {
+	flow                       *capture.Flow
+	client, server             net.Conn
+	clientReader, serverReader *bufio.Reader
+	injector                   capture.Injector
+	stop                       func()
+}
+
+// openLiveWebSocket exercises the real upgrade and both pumps with independently
+// driven peers. Capture reads happen only after stop joins the handler.
+func openLiveWebSocket(t *testing.T, engine *intercept.Engine) *liveWebSocket {
+	t.Helper()
+	clientConn, clientPeer := net.Pipe()
+	serverConn, serverPeer := net.Pipe()
+	for _, conn := range []net.Conn{clientConn, clientPeer, serverConn, serverPeer} {
+		if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeConnections := func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+		_ = clientPeer.Close()
+		_ = serverPeer.Close()
+	}
+	t.Cleanup(closeConnections)
+	req := &http.Request{
+		Method: "GET",
+		URL:    &url.URL{Scheme: "http", Host: "example.test", Path: "/socket"},
+		Host:   "example.test",
+		Header: http.Header{"Connection": {"Upgrade"}, "Upgrade": {"websocket"}},
+	}
+	originDone := make(chan error, 1)
+	serverReader := bufio.NewReader(serverPeer)
+	go func() {
+		incoming, err := http.ReadRequest(serverReader)
+		if err == nil {
+			_ = incoming.Body.Close()
+			_, err = io.WriteString(serverPeer, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+		}
+		originDone <- err
+	}()
+	tamper := &registeredWSTamper{Engine: engine, registered: make(chan capture.Injector, 1)}
+	flow := capture.NewFlow("client", "example.test:80")
+	done := make(chan error, 1)
+	go func() {
+		done <- handleWebSocket(flow, req,
+			bufio.NewReadWriter(bufio.NewReader(clientConn), bufio.NewWriter(clientConn)),
+			bufio.NewReadWriter(bufio.NewReader(serverConn), bufio.NewWriter(serverConn)),
+			tamper, func() {}, closeConnections)
+	}()
+	clientReader := bufio.NewReader(clientPeer)
+	response, err := http.ReadResponse(clientReader, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade status = %d", response.StatusCode)
+	}
+	if err := <-originDone; err != nil {
+		t.Fatal(err)
+	}
+	var injector capture.Injector
+	select {
+	case injector = <-tamper.registered:
+	case <-time.After(time.Second):
+		t.Fatal("live session was not registered")
+	}
+	stopped := false
+	stop := func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		closeConnections()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("upgrade handler: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("upgrade handler did not stop")
+		}
+	}
+	t.Cleanup(stop)
+	return &liveWebSocket{flow, clientPeer, serverPeer, clientReader, serverReader, injector, stop}
+}
+
+func (w *liveWebSocket) send(t *testing.T, dir capture.Direction, opcode byte, payload string) {
+	t.Helper()
+	peer := w.client
+	if dir == capture.ServerToClient {
+		peer = w.server
+	}
+	frame := &wsFrame{
+		Fin: true, Opcode: opcode, Payload: []byte(payload),
+		Masked: dir == capture.ClientToServer, MaskKey: [4]byte{1, 2, 3, 4},
+	}
+	if _, err := peer.Write(frame.encode()); err != nil {
+		t.Fatalf("send %s: %v", dir, err)
+	}
+}
+
+func (w *liveWebSocket) receive(t *testing.T, dir capture.Direction, opcode byte, payload string) {
+	t.Helper()
+	reader := w.serverReader
+	if dir == capture.ServerToClient {
+		reader = w.clientReader
+	}
+	frame, err := readWSFrame(reader)
+	if err != nil {
+		t.Fatalf("receive %s: %v", dir, err)
+	}
+	if frame.Opcode != opcode || string(frame.Payload) != payload || frame.Masked != (dir == capture.ClientToServer) {
+		t.Fatalf("received %s: opcode=%d payload=%q masked=%v", dir, frame.Opcode, frame.Payload, frame.Masked)
+	}
+}
+
+func TestWebSocketDirectionalInterception(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		requests, responses bool
+		scope               scope.Action
+	}{
+		{"response only", false, true, scope.Include},
+		{"request only", true, false, scope.Include},
+		{"both directions", true, true, scope.Include},
+		{"out of scope", true, true, scope.Exclude},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := intercept.NewEngine()
+			engine.SetScope(&scope.Set{Default: tc.scope})
+			engine.SetEnabled(tc.requests)
+			engine.SetInterceptResponses(tc.responses)
+			pauses := make(chan capture.Direction, 8)
+			engine.OnPause(func(token intercept.PauseToken, _ *capture.Flow, msg *capture.Message) {
+				pauses <- msg.Direction
+				engine.Resolve(token, intercept.Resolution{EditedBody: bytes.ToUpper(msg.Raw)})
+			})
+			live := openLiveWebSocket(t, engine)
+			for _, direction := range []struct {
+				dir     capture.Direction
+				enabled bool
+			}{
+				{capture.ClientToServer, tc.requests},
+				{capture.ServerToClient, tc.responses},
+			} {
+				want := "payload"
+				intercepted := direction.enabled && tc.scope == scope.Include
+				if intercepted {
+					want = "PAYLOAD"
+				}
+				live.send(t, direction.dir, opBinary, "payload")
+				live.receive(t, direction.dir, opBinary, want)
+				if intercepted {
+					select {
+					case dir := <-pauses:
+						if dir != direction.dir {
+							t.Fatalf("paused direction = %s, want %s", dir, direction.dir)
+						}
+					default:
+						t.Fatal("frame delivered without directional pause")
+					}
+				}
+				live.send(t, direction.dir, opPing, "control")
+				live.receive(t, direction.dir, opPing, "control")
+				select {
+				case dir := <-pauses:
+					t.Fatalf("unexpected %s pause for disabled/out-of-scope data or control frame", dir)
+				default:
+				}
+			}
+			live.stop()
+			if len(live.flow.Messages) != 2 {
+				t.Fatalf("captured %d messages, want only two data frames", len(live.flow.Messages))
+			}
+		})
+	}
+}
+
+func TestWebSocketIncomingForwardEditDropContinues(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.SetScope(&scope.Set{Default: scope.Include})
+	engine.SetInterceptResponses(true)
+	engine.OnPause(func(token intercept.PauseToken, _ *capture.Flow, msg *capture.Message) {
+		resolution := intercept.Resolution{}
+		switch string(msg.Raw) {
+		case "edit":
+			resolution.EditedBody = []byte("edited")
+		case "drop":
+			resolution.Decision = intercept.Drop
+		}
+		engine.Resolve(token, resolution)
+	})
+	live := openLiveWebSocket(t, engine)
+	for _, exchange := range []struct{ sent, received string }{
+		{"forward", "forward"}, {"edit", "edited"}, {"drop", ""}, {"later", "later"},
+	} {
+		live.send(t, capture.ServerToClient, opText, exchange.sent)
+		if exchange.received != "" {
+			live.receive(t, capture.ServerToClient, opText, exchange.received)
+		}
+	}
+	live.stop()
+	if len(live.flow.Messages) != 4 {
+		t.Fatalf("captured %d messages, want original messages including dropped frame", len(live.flow.Messages))
+	}
+	for i, want := range []string{"forward", "edit", "drop", "later"} {
+		if got := string(live.flow.Messages[i].Body); got != want {
+			t.Errorf("capture %d = %q, want original %q", i, got, want)
+		}
+	}
+}
+
+func TestWebSocketInjectionOvertakesPausedFrameWithoutInterception(t *testing.T) {
+	engine := intercept.NewEngine()
+	engine.SetScope(&scope.Set{Default: scope.Include})
+	engine.SetEnabled(true)
+	paused := make(chan intercept.PauseToken, 2)
+	engine.OnPause(func(token intercept.PauseToken, _ *capture.Flow, _ *capture.Message) {
+		paused <- token
+	})
+	live := openLiveWebSocket(t, engine)
+	live.send(t, capture.ClientToServer, opText, "paused")
+	var token intercept.PauseToken
+	select {
+	case token = <-paused:
+	case <-time.After(time.Second):
+		t.Fatal("ordinary frame did not pause")
+	}
+	// Resolve on failure too, so a failed assertion cannot strand the pump.
+	defer engine.Resolve(token, intercept.Resolution{})
+	injected := make(chan error, 1)
+	go func() {
+		injected <- live.injector.Inject(capture.ClientToServer, WSText, []byte("injected"))
+	}()
+	live.receive(t, capture.ClientToServer, opText, "injected")
+	if err := <-injected; err != nil {
+		t.Fatal(err)
+	}
+	engine.Resolve(token, intercept.Resolution{})
+	live.receive(t, capture.ClientToServer, opText, "paused")
+	live.stop()
+	if len(live.flow.Messages) != 2 {
+		t.Fatalf("capture count = %d", len(live.flow.Messages))
+	}
+	if first, second := live.flow.Messages[0], live.flow.Messages[1]; string(first.Body) != "injected" ||
+		first.Meta["injected"] != "true" || string(second.Body) != "paused" || second.Meta["injected"] != "" {
+		t.Fatalf("capture order differs from delivery: %+v", live.flow.Messages)
+	}
+	select {
+	case <-paused:
+		t.Fatal("injected frame re-entered interception")
+	default:
+	}
+	if _, ok := engine.Session(live.flow.ID); ok {
+		t.Fatal("closed connection retained an injectable session")
+	}
+	if err := live.injector.Inject(capture.ServerToClient, WSText, []byte("closed")); err == nil {
+		t.Fatal("stale injector accepted a closed connection")
+	}
+	if len(live.flow.Messages) != 2 {
+		t.Fatal("failed closed-session injection was captured")
+	}
+}
+
+type partialWSWriter struct {
+	err error
+}
+
+func (w partialWSWriter) Write(p []byte) (int, error) {
+	return len(p) / 2, w.err
+}
+
+func TestWebSocketIncompleteInjectionIsNotCaptured(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		size int
+		err  error
+	}{
+		{"short flush", 8, nil},
+		{"failed flush", 8, io.ErrClosedPipe},
+		{"failed direct write", 8192, io.ErrClosedPipe},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flow := capture.NewFlow("client", "server")
+			notifications := 0
+			dst := bufio.NewReadWriter(bufio.NewReader(strings.NewReader("")), bufio.NewWriter(partialWSWriter{tc.err}))
+			session := &wsSession{client: dst, server: dst, flow: flow, touch: func() { notifications++ }}
+			err := session.Inject(capture.ClientToServer, WSBinary, bytes.Repeat([]byte("x"), tc.size))
+			want := tc.err
+			if want == nil {
+				want = io.ErrShortWrite
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("injection error = %v, want %v", err, want)
+			}
+			if len(flow.Messages) != 0 || notifications != 0 {
+				t.Fatalf("incomplete frame published: messages=%d notifications=%d", len(flow.Messages), notifications)
+			}
+		})
+	}
+}
+
+func TestWebSocketInjectionNotificationCanInjectInWriteOrder(t *testing.T) {
+	var received bytes.Buffer
+	dst := bufio.NewReadWriter(bufio.NewReader(strings.NewReader("")), bufio.NewWriter(&received))
+	flow := capture.NewFlow("client", "server")
+	session := &wsSession{client: dst, server: dst, flow: flow}
+	calls := 0
+	var callbackErr error
+	session.touch = func() {
+		calls++
+		if calls == 1 {
+			callbackErr = session.Inject(capture.ClientToServer, WSText, []byte("second"))
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- session.Inject(capture.ClientToServer, WSText, []byte("first")) }()
+	select {
+	case err := <-done:
+		if err != nil || callbackErr != nil {
+			t.Fatalf("injection errors: first=%v second=%v", err, callbackErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("notification ran under the session write lock")
+	}
+	if len(flow.Messages) != 2 {
+		t.Fatalf("capture count = %d, want two successful injections", len(flow.Messages))
+	}
+	reader := bufio.NewReader(&received)
+	for i, want := range []string{"first", "second"} {
+		frame, err := readWSFrame(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(frame.Payload) != want || string(flow.Messages[i].Body) != want {
+			t.Fatalf("wire/capture order at %d: wire=%q capture=%q", i, frame.Payload, flow.Messages[i].Body)
+		}
 	}
 }
 

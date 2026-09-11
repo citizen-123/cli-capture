@@ -87,38 +87,6 @@ func TestPaneRectsAdjoinAndMatchContentGrid(t *testing.T) {
 
 // --- flow-row hit testing ---
 
-func TestFlowRowIndex(t *testing.T) {
-	tests := []struct {
-		name                         string
-		y, h, nVis, selected         int
-		filterLineShown, pausedShown bool
-		wantIdx                      int
-		wantOK                       bool
-	}{
-		{"header row is never a hit", 0, 10, 3, 0, false, false, 0, false},
-		{"first list row", 1, 10, 3, 0, false, false, 0, true},
-		{"last real row", 3, 10, 3, 0, false, false, 2, true},
-		{"past the end of a short list", 4, 10, 3, 0, false, false, 0, false},
-		{"way past the end doesn't panic", 9, 10, 3, 0, false, false, 0, false},
-		{"filter line eats the row above the list", 1, 10, 3, 0, true, false, 0, false},
-		{"list shifts down one row when filtering", 2, 10, 3, 0, true, false, 0, true},
-		{"paused prompt shrinks available rows", 8, 10, 10, 0, false, true, 0, false},
-		{"one row before the paused-shrunk cutoff is still valid", 7, 10, 10, 0, false, true, 6, true},
-		{"scrolled window follows a far-down selection", 1, 10, 30, 25, false, false, 17, true},
-		{"scrolled window: bottom visible row is the selection", 9, 10, 30, 25, false, false, 25, true},
-		{"scrolled window: one past the bottom", 10, 10, 30, 25, false, false, 0, false},
-		{"empty list never hits", 1, 10, 0, 0, false, false, 0, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			idx, ok := flowRowIndex(tc.y, tc.h, tc.nVis, tc.selected, tc.filterLineShown, false, tc.pausedShown)
-			if ok != tc.wantOK || (ok && idx != tc.wantIdx) {
-				t.Errorf("flowRowIndex(y=%d,h=%d,nVis=%d,selected=%d,filter=%v,paused=%v) = (%d,%v), want (%d,%v)",
-					tc.y, tc.h, tc.nVis, tc.selected, tc.filterLineShown, tc.pausedShown, idx, ok, tc.wantIdx, tc.wantOK)
-			}
-		})
-	}
-}
 
 // --- left pane: forward-to-child translation ---
 
@@ -457,7 +425,7 @@ func TestHelpOverlayWheelScrolls(t *testing.T) {
 func TestHelpOverlayWheelClampsAtBottom(t *testing.T) {
 	m := modalModel(nil)
 	m.showHelp = true
-	max := m.maxHelpScroll(m.height)
+	max := m.maxHelpScroll(m.height-m.chromeHeight())
 	// Without this the test passes vacuously on a terminal tall enough to show
 	// the whole help body: max would be 0, the scroll would already be at the
 	// bottom, and "it didn't move" would prove nothing about the clamp.

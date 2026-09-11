@@ -63,7 +63,7 @@ func run() error {
 		confDir = flag.String("dir", defaultDir(), "data directory: CA, sessions, exports, log")
 
 		themeName = flag.String("theme", "", "color theme: "+strings.Join(theme.Names(), " | ")+" (default "+theme.Default+")")
-		leaderKey = flag.String("leader", "", "prefix key for cli-capture's own commands: ctrl+a … ctrl+z (default "+tui.DefaultLeader+"). Move it if your target app needs the default")
+		leaderKey = flag.String("leader", "", "prefix key for cli-capture commands: ctrl+space or ctrl+a … ctrl+z (default "+tui.DefaultLeader+"). Override it if your terminal or target claims the key")
 	)
 
 	// -config may be repeated and/or comma-separated; every file merges in the
@@ -294,7 +294,10 @@ func run() error {
 		runProgram: func(sigCh <-chan os.Signal) error {
 			return runProgram(
 				func() error {
-					_, err := prog.Run()
+					final, err := prog.Run()
+					if model, ok := final.(tui.Model); ok {
+						model.Close()
+					}
 					return err
 				},
 				prog.Quit,

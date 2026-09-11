@@ -80,3 +80,66 @@ func TestParsePayloads(t *testing.T) {
 		t.Error("comment line should be ignored")
 	}
 }
+
+func TestParseRawRejectsMalformedTemplates(t *testing.T) {
+	base := &Template{URL: "http://origin.example/seed"}
+	for name, raw := range map[string]string{
+		"missing version":              "GET /path\n\n",
+		"extra request token":          "GET /path HTTP/1.1 extra\n\n",
+		"method":                       "G@T /path HTTP/1.1\n\n",
+		"version":                      "GET /path not-http\n\n",
+		"header without colon":         "GET /path HTTP/1.1\nAuthorization secret\n\n",
+		"header name whitespace":       "GET /path HTTP/1.1\nBad Name: value\n\n",
+		"space before header colon":    "GET /path HTTP/1.1\nX-Test : value\n\n",
+		"header control value":         "GET /path HTTP/1.1\nX-Test: a\x00b\n\n",
+		"header bare carriage return":  "GET /path HTTP/1.1\nX-Test: a\rb\n\n",
+		"relative target":              "GET path HTTP/1.1\n\n",
+		"target fragment":              "GET /path#fragment HTTP/1.1\n\n",
+		"invalid percent escape":       "GET /%ZZ HTTP/1.1\n\n",
+		"non HTTP absolute target":     "GET ftp://other.example/path HTTP/1.1\n\n",
+		"absolute target without host": "GET http:///path HTTP/1.1\n\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if parsed, err := ParseRaw(raw, base); err == nil || parsed != nil {
+				t.Fatalf("malformed request accepted: template=%+v, error=%v", parsed, err)
+			}
+		})
+	}
+}
+
+func TestParseRawKeepsFixedOriginAndFuzzableTarget(t *testing.T) {
+	base := &Template{URL: "https://origin.example:443/seed", Secure: true}
+	for _, target := range []string{
+		"/{{id}}/%{{escaped}}?q={{query}}",
+		"http://other.example/{{id}}/%{{escaped}}?q={{query}}",
+	} {
+		t.Run(target, func(t *testing.T) {
+			raw := "POST " + target + " HTTP/1.1\nX-Value: {{header}}\nContent-Length: 999\n\nbody\r\nbytes"
+			parsed, err := ParseRaw(raw, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.URL != "https://origin.example:443/{{id}}/%{{escaped}}?q={{query}}" {
+				t.Fatalf("template target lost insertion points or changed origin: %q", parsed.URL)
+			}
+			req, err := parsed.Render(map[string]string{"id": "user", "escaped": "41", "query": "%2F", "header": "雪"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req.URL.Host != "origin.example:443" || req.URL.Scheme != "https" || req.URL.RequestURI() != "/user/%41?q=%2F" {
+				t.Fatalf("rendered target = %s", req.URL)
+			}
+			if req.Header.Get("X-Value") != "雪" || string(parsed.Body) != "body\r\nbytes" || parsed.Header.Get("Content-Length") != "999" {
+				t.Fatal("target validation changed valid fuzzed values, body bytes, or explicit length")
+			}
+		})
+	}
+}
+
+func TestParseRawRejectsInvalidOrigin(t *testing.T) {
+	for _, origin := range []string{"http://%zz/path", "http:///path", "ftp://origin.example/path"} {
+		if parsed, err := ParseRaw("GET /path HTTP/1.1\n\n", &Template{URL: origin}); err == nil || parsed != nil {
+			t.Fatalf("invalid origin %q accepted: %+v, %v", origin, parsed, err)
+		}
+	}
+}

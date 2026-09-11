@@ -1,6 +1,7 @@
 package repeater
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,11 +19,12 @@ var client = &http.Client{Timeout: 30 * time.Second}
 // new Flow — so a repeated request shows up in the traffic list and can be
 // inspected, exported, or repeated again. This is the single-shot primitive that
 // Repeater calls once and Sniper will call in a loop.
-func Send(t *Template, vars map[string]string) (*capture.Flow, error) {
+func Send(ctx context.Context, t *Template, vars map[string]string) (*capture.Flow, error) {
 	req, logicalBody, proto, err := t.render(vars)
 	if err != nil {
 		return nil, err
 	}
+	req = req.WithContext(ctx)
 
 	nf := capture.NewFlow("repeater", req.URL.Host)
 	nf.Secure = t.Secure

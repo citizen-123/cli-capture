@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
@@ -62,6 +63,61 @@ func TestFlowText(t *testing.T) {
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Error("text export must not contain ANSI color codes")
+	}
+}
+
+func TestFlowTextPreservesInjectionProvenanceAfterReload(t *testing.T) {
+	flow := capture.NewFlow("client", "socket.example:80")
+	flow.Protocol = capture.ProtoWebSocket
+	stamp := time.Date(2026, time.September, 9, 12, 30, 0, 123, time.UTC)
+	flow.AddMessage(&capture.Message{
+		Direction: capture.ClientToServer,
+		Timestamp: stamp,
+		Summary:   capture.ClientToServer.String() + " ws:text 6 B",
+		Body:      []byte("manual"),
+		Raw:       []byte("manual"),
+		Meta:      map[string]string{"opcode": "text", "injected": "true"},
+	})
+	flow.AddMessage(&capture.Message{
+		Direction: capture.ServerToClient,
+		Timestamp: stamp.Add(time.Second),
+		Summary:   capture.ServerToClient.String() + " ws:text 4 B",
+		Body:      []byte("echo"),
+		Raw:       []byte("echo"),
+		Meta:      map[string]string{"opcode": "text"},
+	})
+	// Legacy captures can have no optional metadata or timestamp at all.
+	flow.AddMessage(&capture.Message{
+		Direction: capture.ServerToClient,
+		Summary:   "legacy frame",
+		Body:      []byte("legacy"),
+	})
+	var session bytes.Buffer
+	if err := capture.Save(&session, []*capture.Flow{flow}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := capture.Load(&session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 || len(loaded[0].Messages) != 3 {
+		t.Fatalf("roundtrip lost capture messages: %+v", loaded)
+	}
+	out := FlowText(loaded[0])
+	if strings.Count(out, "[injected]") != 1 {
+		t.Fatalf("injection must be marked once, without marking echo or legacy frames:\n%s", out)
+	}
+	if strings.Count(out, capture.ClientToServer.String()) != 1 ||
+		strings.Count(out, capture.ServerToClient.String()) != 2 {
+		t.Fatalf("streaming directions must appear once per message:\n%s", out)
+	}
+	for _, content := range []string{"manual", "echo", "legacy", "ws:text", stamp.Format(time.RFC3339Nano)} {
+		if !strings.Contains(out, content) {
+			t.Errorf("text export lost captured content %q:\n%s", content, out)
+		}
+	}
+	if loaded[0].Messages[1].Meta["injected"] != "" || loaded[0].Messages[2].Meta["injected"] != "" {
+		t.Fatal("reload invented provenance for ordinary or legacy messages")
 	}
 }
 

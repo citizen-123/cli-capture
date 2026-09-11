@@ -3,6 +3,7 @@ package repeater
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,9 +12,51 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 )
+
+func TestSendCancelsHeldResponse(t *testing.T) {
+	started, disconnected := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(disconnected)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		flow *capture.Flow
+		err  error
+	}
+	results := make(chan result, 1)
+	go func() {
+		flow, err := Send(ctx, &Template{Method: http.MethodGet, URL: server.URL}, nil)
+		results <- result{flow, err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("request did not reach server")
+	}
+	cancel()
+	select {
+	case got := <-results:
+		if !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("Send error = %v, want cancellation", got.err)
+		}
+		assertRepeaterResponseFailure(t, got.flow, got.err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("send remained blocked after cancellation")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("origin request was not canceled")
+	}
+}
 
 func templFlow() *capture.Flow {
 	f := capture.NewFlow("c", "api.example.com:443")
@@ -95,7 +138,7 @@ func TestSendEndToEnd(t *testing.T) {
 		Body:   []byte(`{"n":{{n}}}`),
 	}
 
-	flow, err := Send(tmpl, map[string]string{"id": "42", "tok": "T", "n": "7"})
+	flow, err := Send(context.Background(), tmpl, map[string]string{"id": "42", "tok": "T", "n": "7"})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -152,7 +195,7 @@ func TestSendReencodesCapturedGzipBodyAfterSubstitution(t *testing.T) {
 		t.Fatalf("ParseRaw: %v", err)
 	}
 
-	repeated, err := Send(edited, map[string]string{"value": "substituted"})
+	repeated, err := Send(context.Background(), edited, map[string]string{"value": "substituted"})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -232,7 +275,7 @@ func TestSendFramesCapturedGRPCMessages(t *testing.T) {
 				t.Fatalf("ParseRaw: %v", err)
 			}
 
-			repeated, err := Send(edited, tt.vars)
+			repeated, err := Send(context.Background(), edited, tt.vars)
 			if err != nil {
 				t.Fatalf("Send: %v", err)
 			}
@@ -256,7 +299,7 @@ func TestSendRejectsTruncatedResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	flow, err := Send(&Template{Method: http.MethodGet, URL: srv.URL}, nil)
+	flow, err := Send(context.Background(), &Template{Method: http.MethodGet, URL: srv.URL}, nil)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("Send error = %v, want unexpected EOF", err)
 	}
@@ -281,7 +324,7 @@ func TestSendRejectsResponseReadFailureAndClosesBody(t *testing.T) {
 		}, nil
 	})}
 
-	flow, err := Send(&Template{Method: http.MethodGet, URL: "http://example.test/"}, nil)
+	flow, err := Send(context.Background(), &Template{Method: http.MethodGet, URL: "http://example.test/"}, nil)
 	if !errors.Is(err, readErr) {
 		t.Fatalf("Send error = %v, want %v", err, readErr)
 	}
@@ -307,7 +350,7 @@ func TestSendRetainsCompleteResponseWhenCloseFails(t *testing.T) {
 		}, nil
 	})}
 
-	flow, err := Send(&Template{Method: http.MethodGet, URL: "http://example.test/"}, nil)
+	flow, err := Send(context.Background(), &Template{Method: http.MethodGet, URL: "http://example.test/"}, nil)
 	if err != nil {
 		t.Fatalf("Send error = %v, want nil", err)
 	}

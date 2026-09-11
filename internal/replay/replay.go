@@ -6,6 +6,7 @@ package replay
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,7 +23,7 @@ var client = &http.Client{Timeout: 30 * time.Second}
 
 // Resend reconstructs f's request, sends it again, and returns the newly
 // captured flow. The original flow is left untouched.
-func Resend(f *capture.Flow) (*capture.Flow, error) {
+func Resend(ctx context.Context, f *capture.Flow) (*capture.Flow, error) {
 	if f.Request == nil {
 		return nil, fmt.Errorf("replay: flow has no request to resend")
 	}
@@ -51,7 +52,7 @@ func Resend(f *capture.Flow) (*capture.Flow, error) {
 	}
 	url := scheme + "://" + f.ServerAddr + f.Request.Meta["path"]
 
-	req, err := http.NewRequest(method, url, bytes.NewReader(wireBody))
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(wireBody))
 	if err != nil {
 		return nil, err
 	}

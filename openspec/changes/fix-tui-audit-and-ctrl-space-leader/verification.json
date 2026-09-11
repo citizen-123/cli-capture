@@ -1,0 +1,165 @@
+{
+  "change": "fix-tui-audit-and-ctrl-space-leader",
+  "status": "passed",
+  "project_checks": {
+    "go build ./...": "passed",
+    "go vet ./...": "passed",
+    "go test -race ./...": "passed",
+    "openspec validate fix-tui-audit-and-ctrl-space-leader --strict": "passed"
+  },
+  "ledger": {
+    "D01": {
+      "automated": "Exact editor bytes, header-only changes, binary retention, Content-Length, compressed bodies, and body-only HTTP/2/gRPC framing.",
+      "live": "An unchanged intercepted GET reached the fixture with CRLF headers and an empty body. Repeater also sent an unchanged GET successfully."
+    },
+    "D02": {
+      "automated": "Preloaded flow navigation, flags, detail, filters, exports, new-flow delivery, and export errors.",
+      "live": "Five saved rows appeared before new traffic. With one visible filtered row, session JSON and HAR each retained all five flows."
+    },
+    "D03": {
+      "automated": "Asynchronous resend, immutable snapshots, cancellation, bounded progress, duplicate prevention, and shutdown.",
+      "live": "Help remained responsive during a held response. Global cancellation stopped the active request."
+    },
+    "D04": {
+      "automated": "Incoming/outgoing WebSocket scope and toggle combinations, forward/edit/drop, and continued connection use.",
+      "live": "Response interception held an incoming echo. The client received the edited payload."
+    },
+    "D05": {
+      "automated": "Exactly-once injection capture, direction/opcode/bytes, partial-write errors, optional metadata, and export round trips.",
+      "live": "Saved history retained one injected outbound frame, a separate ordinary echo, and one injected inbound frame. A closed-session send retained its draft."
+    },
+    "D06": {
+      "automated": "Reflow after terminal and split resize, including bottom anchoring.",
+      "live": "Open detail remained at 100% with ENDTOKEN visible after shrinking to 80x24 and growing again."
+    },
+    "D07": {
+      "automated": "Cell-bounded detail, Repeater, prompts, status, compact panes, and tiny terminals.",
+      "live": "Exercised 160x48, 120x36, 80x24, tiny terminals, extreme splits, and all four built-in themes."
+    },
+    "D08": {
+      "automated": "HTTP code/reason separate from lifecycle, existing errors, single direction labels, and injection markers.",
+      "live": "HTTP 500 traffic and WebSocket injection history displayed distinct status and provenance."
+    },
+    "D09": {
+      "automated": "Effective custom and unbound modal controls and canonical default hints.",
+      "live": "A Ctrl+G CLI override superseded Ctrl+A in the configuration. Help displayed the rebound H action and Ctrl+G footer."
+    },
+    "D10": {
+      "automated": "Global actions across modal owners, suspended drafts/cursors, pending and unknown leaders, collision rejection, and mouse ownership.",
+      "live": "Pane/help round trips preserved editor and Repeater state. Global commands remained available during pause inspection and jobs."
+    },
+    "U01": {
+      "automated": "Held-flow, direction, token identity, queue count, and selected-row distinction.",
+      "live": "The none theme displayed one held request and one queued request while a different traffic row remained selected."
+    },
+    "U02": {
+      "automated": "Pause arrival preserved terminal, filter, command, and editor input; FIFO token-specific resolution.",
+      "live": "A held request did not steal terminal focus. Terminal input continued before reversible pause inspection."
+    },
+    "U03": {
+      "automated": "Status/size/protocol columns, long targets, payload access, sorting, and rendered mouse row mapping.",
+      "live": "Sorted and flagged loaded traffic, attack results, and narrow views retained comparison columns."
+    },
+    "U04": {
+      "automated": "Attack count rules and overflow, actual outcomes, stale-session isolation, cancellation races, and joined shutdown.",
+      "live": "All five modes produced 1/5/2/2/6 requests. Closing Repeater retained global progress and cancellation."
+    },
+    "U05": {
+      "automated": "Distinct empty capture, filter, and flagged-only states with configured hints.",
+      "live": "Captured no-traffic, zero-filter-match, and zero-flagged-row views."
+    },
+    "U06": {
+      "automated": "Raw/expanded representations, safe controls, preview caps, adaptive hex, scrolling, and unchanged stored/export bytes.",
+      "live": "Toggled raw/expanded detail and retained the final long-body content after resize."
+    },
+    "L01": {
+      "automated": "NUL recognition, aliases, explicit overrides, one-byte passthrough, CLI/file precedence, and every-context collision checks.",
+      "live": "NUL leader commands worked throughout the TUI. Ordinary Ctrl+A reached readline. An explicit Ctrl+A leader required a double press to send one literal byte."
+    }
+  },
+  "live_receipts": {
+    "attack_modes": {
+      "single": 1,
+      "sniper": 5,
+      "battering-ram": 2,
+      "pitchfork": 2,
+      "cluster-bomb": 6
+    },
+    "attack_wire_requests": 16,
+    "attack_session_flows_including_seed": 17,
+    "slow_requests_started": 3,
+    "slow_requests_observed_canceled": 3,
+    "filtered_visible_flows": 1,
+    "session_export_flows": 5,
+    "har_export_entries": 5,
+    "saved_flagged_flows": 1,
+    "curl_export_execution": "Returned the 140-byte synthetic users response.",
+    "websocket_history": [
+      {
+        "direction": 1,
+        "injected": null,
+        "opcode": "text",
+        "payload": "fixture greeting",
+        "timestamp": "2026-09-09T21:07:44.69314098-05:00"
+      },
+      {
+        "direction": 0,
+        "injected": "true",
+        "opcode": "text",
+        "payload": "injected-outbound",
+        "timestamp": "2026-09-09T21:09:27.050589448-05:00"
+      },
+      {
+        "direction": 1,
+        "injected": null,
+        "opcode": "text",
+        "payload": "injected-outbound",
+        "timestamp": "2026-09-09T21:09:27.051520187-05:00"
+      },
+      {
+        "direction": 0,
+        "injected": null,
+        "opcode": "text",
+        "payload": "echo-me",
+        "timestamp": "2026-09-09T21:09:27.886609449-05:00"
+      },
+      {
+        "direction": 1,
+        "injected": null,
+        "opcode": "text",
+        "payload": "echo-me",
+        "timestamp": "2026-09-09T21:09:27.888318912-05:00"
+      },
+      {
+        "direction": 1,
+        "injected": "true",
+        "opcode": "text",
+        "payload": "injected-inbound",
+        "timestamp": "2026-09-09T21:09:29.261905997-05:00"
+      }
+    ]
+  },
+  "screenshots": [
+    "docs/img/01-overview-split-pane.png",
+    "docs/img/02-flow-detail-json.png",
+    "docs/img/03-request-headers-and-body.png",
+    "docs/img/04-gzip-decoded-response.png",
+    "docs/img/05-filter-by-path.png",
+    "docs/img/06-flag-flows.png",
+    "docs/img/07-flagged-only.png",
+    "docs/img/08-sort-by-size.png",
+    "docs/img/09-repeater-inline-response.png",
+    "docs/img/10-repeater-attack-modes.png",
+    "docs/img/11-intercept-paused.png",
+    "docs/img/12-intercept-edit-request.png",
+    "docs/img/13-help-overlay.png",
+    "docs/img/14-export-flow-command.png",
+    "docs/img/15-export-har.png",
+    "docs/img/16-resend-canceled.png",
+    "docs/img/17-websocket-injection-history.png",
+    "docs/img/18-detail-narrow-bottom.png",
+    "docs/img/19-none-queued-pauses.png"
+  ],
+  "cleanup": "The supervised fixture and terminal-driver processes were stopped. Temporary fixture scripts, captures, and binaries were removed.",
+  "scope_note": "All live traffic used isolated local fixtures. Transparent Linux interception and external production services were not exercised."
+}

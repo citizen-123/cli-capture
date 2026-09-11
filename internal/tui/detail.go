@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -33,62 +34,124 @@ var jsonExpandStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Ital
 // while keeping a hard ceiling.
 const maxEmbedDepth = 6
 
-// wrapDetail renders a flow's detail and hard-wraps it to width. Hardwrap is
-// ANSI-aware, so the JSON syntax colors are preserved across wrap points and
-// long lines (big token strings, URLs) no longer clip off the right edge.
-// Expansion of embedded JSON/escaped-newline strings is always on here; a
-// future UI toggle can call renderFlowDetail directly with expand=false.
-func wrapDetail(f *capture.Flow, width int) string {
+// wrapDetail wraps the chosen display representation without changing capture bytes.
+func wrapDetail(f *capture.Flow, width int, expand bool) string {
 	if width < 1 {
 		width = 80
 	}
-	return ansi.Hardwrap(renderFlowDetail(f, width, true), width, false)
+	return ansi.Hardwrap(renderFlowDetail(f, width, expand), width, false)
 }
 
-// renderFlowDetail formats a full view of one flow: metadata, request and
-// response (headers + body), and the ordered message list for streaming flows.
-// expand controls whether JSON-string bodies get their embedded
-// JSON/escaped-newline values unwrapped (see prettyJSON) — a pure parameter
-// rather than a package-level flag so a caller can render either way without
-// touching shared state.
+// renderFlowDetail is a bounded inspection preview, independent of full exports.
 func renderFlowDetail(f *capture.Flow, width int, expand bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s  %s\n", f.Protocol, f.Title())
-	fmt.Fprintf(&b, "server %s   sni %s   secure %v   status %s\n",
-		f.ServerAddr, dash(f.SNI), f.Secure, f.Status)
+	fmt.Fprintf(&b, "%s\n", selectedFlowSummary(f))
+	fmt.Fprintf(&b, "server %s   sni %s   secure %v   lifecycle %s\n",
+		sanitizeExpandedText(f.ServerAddr), sanitizeExpandedText(dash(f.SNI)), f.Secure, f.Status)
+	if f.Response != nil {
+		status := responseStatus(f.Response)
+		if status != "" {
+			fmt.Fprintf(&b, "HTTP response: %s\n", sanitizeExpandedText(status))
+		}
+	}
+	mode := "raw captured representation"
+	if expand {
+		mode = "expanded display"
+	}
+	fmt.Fprintf(&b, "mode: %s\n", mode)
 	if f.Err != nil {
-		fmt.Fprintf(&b, "error: %v\n", f.Err)
+		fmt.Fprintf(&b, "error: %s\n", sanitizeExpandedText(f.Err.Error()))
 	}
 
 	if f.Request != nil {
 		b.WriteString("\n" + sectionStyle.Render("── REQUEST ──") + "\n")
-		b.WriteString(renderMessage(f.Request, width, expand))
+		b.WriteString(detailMessage(f.Request, f.Protocol, width, expand))
 	}
 	if f.Response != nil {
 		b.WriteString("\n" + sectionStyle.Render("── RESPONSE ──") + "\n")
-		b.WriteString(renderMessage(f.Response, width, expand))
+		b.WriteString(detailMessage(f.Response, f.Protocol, width, expand))
 	}
 	if len(f.Messages) > 0 {
 		fmt.Fprintf(&b, "\n%s\n", sectionStyle.Render(fmt.Sprintf("── MESSAGES (%d) ──", len(f.Messages))))
 		for i, m := range f.Messages {
 			if i >= 300 {
-				fmt.Fprintf(&b, "… %d more\n", len(f.Messages)-i)
+				fmt.Fprintf(&b, "… %d messages omitted (%d total); export full stored content\n", len(f.Messages)-i, len(f.Messages))
 				break
 			}
-			fmt.Fprintf(&b, "%s %s\n", m.Direction, m.Summary)
-			if len(m.Body) > 0 {
-				b.WriteString(indent(bodyPreview(m.Body, expand), "    ") + "\n")
+			summary := strings.TrimSpace(m.Summary)
+			// Older captures include the direction in Summary; Direction remains
+			// authoritative, so strip that prefix before rendering it once.
+			for strings.HasPrefix(summary, "→") || strings.HasPrefix(summary, "←") {
+				summary = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(summary, "→"), "←"))
+			}
+			provenance := ""
+			if m.Meta["injected"] == "true" {
+				provenance = " [injected]"
+			}
+			fmt.Fprintf(&b, "%s %s%s\n", m.Direction, sanitizeExpandedText(summary), provenance)
+			if len(m.Body) > 0 || (!expand && len(m.Raw) > 0) {
+				contentWidth := max(1, width-4)
+				var content string
+				if expand {
+					content = bodyPreview(m.Body, contentWidth, true)
+				} else {
+					content = rawMessage(m, f.Protocol, contentWidth)
+				}
+				b.WriteString(indent(content, "    ") + "\n")
 			}
 		}
 	}
 	return b.String()
 }
 
+func responseStatus(m *capture.Message) string {
+	if status := strings.TrimSpace(m.Meta["status"]); status != "" {
+		return status
+	}
+	summary := strings.TrimSpace(m.Summary)
+	if strings.HasPrefix(summary, "HTTP/") {
+		if _, rest, ok := strings.Cut(summary, " "); ok {
+			summary = strings.TrimSpace(rest)
+		}
+	}
+	if len(summary) >= 3 && summary[0] >= '1' && summary[0] <= '5' &&
+		summary[1] >= '0' && summary[1] <= '9' && summary[2] >= '0' && summary[2] <= '9' {
+		return summary
+	}
+	return ""
+}
+
+func detailMessage(m *capture.Message, protocol capture.Protocol, width int, expand bool) string {
+	if !expand {
+		if protocol == capture.ProtoWebSocket {
+			// Request/Response hold the HTTP upgrade, not WebSocket frames.
+			protocol = capture.ProtoHTTP1
+		}
+		return rawMessage(m, protocol, width) + "\n"
+	}
+	return renderMessage(m, width, true)
+}
+
+func rawMessage(m *capture.Message, protocol capture.Protocol, width int) string {
+	data := m.Raw
+	label := "Captured Raw (" + string(protocol) + ")"
+	if protocol == capture.ProtoHTTP1 {
+		label = "Captured serialized HTTP/1.1"
+	} else if protocol == capture.ProtoWebSocket {
+		label = "Captured WebSocket payload (not frame bytes)"
+	}
+	if len(data) == 0 {
+		data = m.Body
+		label = "Captured body fallback (" + string(protocol) + "; serialized bytes unavailable)"
+	}
+	return label + "\n" + capturedPreview(data, width)
+}
+
 func renderMessage(m *capture.Message, width int, expand bool) string {
 	var b strings.Builder
 	for _, k := range sortedKeys(m.Headers) {
 		for _, v := range m.Headers[k] {
-			fmt.Fprintf(&b, "%s: %s\n", k, v)
+			fmt.Fprintf(&b, "%s: %s\n", sanitizeExpandedText(k), sanitizeExpandedText(v))
 		}
 	}
 	if len(m.Meta) > 0 {
@@ -96,20 +159,17 @@ func renderMessage(m *capture.Message, width int, expand bool) string {
 			if k == "method" || k == "path" || k == "status" {
 				continue // already in the summary/title
 			}
-			fmt.Fprintf(&b, "· %s: %s\n", k, m.Meta[k])
+			fmt.Fprintf(&b, "· %s: %s\n", sanitizeExpandedText(k), sanitizeExpandedText(m.Meta[k]))
 		}
 	}
 	if len(m.Body) > 0 {
-		b.WriteString("\n" + bodyPreview(m.Body, expand) + "\n")
+		b.WriteString("\nCaptured body · expanded display\n" + bodyPreview(m.Body, width, expand) + "\n")
 	}
 	return b.String()
 }
 
-// bodyPreview shows JSON pretty-printed and syntax-highlighted, other textual
-// bodies as-is, and binary bodies as a hex dump — all capped so a large body
-// can't flood the pane. expand is threaded straight through to prettyJSON;
-// this function itself never inspects string contents.
-func bodyPreview(body []byte, expand bool) string {
+// bodyPreview pretty-prints bounded JSON; other bodies use a safe text/hex preview.
+func bodyPreview(body []byte, width int, expand bool) string {
 	// JSON gets pretty-printed and colored (the detail view is scrollable, so a
 	// larger cap is fine here than for the plain/hex fallbacks).
 	if len(body) <= 256*1024 {
@@ -118,20 +178,23 @@ func bodyPreview(body []byte, expand bool) string {
 		}
 	}
 
-	const max = 8192
-	b := body
-	truncated := false
-	if len(b) > max {
-		b, truncated = b[:max], true
+	return capturedPreview(body, width)
+}
+
+func capturedPreview(body []byte, width int) string {
+	const limit = 8192
+	shown := body
+	if len(shown) > limit {
+		shown = shown[:limit]
 	}
 	var s string
-	if isMostlyPrintable(b) {
-		s = string(b)
+	if isMostlyPrintable(shown) {
+		s = sanitizeExpandedText(string(shown))
 	} else {
-		s = hexDump(b)
+		s = hexDump(shown, width)
 	}
-	if truncated {
-		s += fmt.Sprintf("\n… (%d bytes total)", len(body))
+	if len(shown) < len(body) {
+		s += fmt.Sprintf("\n… %d bytes omitted (%d bytes total); export full stored content", len(body)-len(shown), len(body))
 	}
 	return s
 }
@@ -324,6 +387,9 @@ func isMostlyPrintable(b []byte) bool {
 	if len(b) == 0 {
 		return true
 	}
+	if !utf8.Valid(b) {
+		return false
+	}
 	printable := 0
 	for _, c := range b {
 		if c == '\n' || c == '\r' || c == '\t' || (c >= 0x20 && c < 0x7f) {
@@ -333,20 +399,33 @@ func isMostlyPrintable(b []byte) bool {
 	return printable*100/len(b) >= 85
 }
 
-func hexDump(b []byte) string {
+func hexDump(b []byte, width int) string {
 	var out strings.Builder
-	for i := 0; i < len(b); i += 16 {
-		end := i + 16
-		if end > len(b) {
-			end = len(b)
+	// Offset, hex, and ASCII columns take 13 + 4*n cells. For widths
+	// too small for those columns, omit offsets/ASCII rather than wrapping them.
+	perRow := min(16, (width-13)/4)
+	columns := perRow >= 1
+	if !columns {
+		perRow = max(1, width/3)
+	}
+	for i := 0; i < len(b); i += perRow {
+		end := min(i+perRow, len(b))
+		if columns {
+			fmt.Fprintf(&out, "%08x  ", i)
 		}
-		fmt.Fprintf(&out, "%08x  ", i)
-		for j := i; j < i+16; j++ {
+		for j := i; j < i+perRow; j++ {
 			if j < end {
-				fmt.Fprintf(&out, "%02x ", b[j])
-			} else {
-				out.WriteString("   ")
+				fmt.Fprintf(&out, "%02x", b[j])
+			} else if columns {
+				out.WriteString("  ")
 			}
+			if columns || j+1 < end {
+				out.WriteByte(' ')
+			}
+		}
+		if !columns {
+			out.WriteByte('\n')
+			continue
 		}
 		out.WriteString(" |")
 		for j := i; j < end; j++ {

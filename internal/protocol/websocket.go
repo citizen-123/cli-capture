@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -20,38 +21,60 @@ import (
 type wsSession struct {
 	client, server *bufio.ReadWriter
 	cmu, smu       sync.Mutex
+	flow           *capture.Flow
+	touch          func()
 }
 
-func (s *wsSession) writeToClient(b []byte) error {
-	s.cmu.Lock()
-	defer s.cmu.Unlock()
-	if _, err := s.client.Write(b); err != nil {
-		return err
+// writeFrame records a delivered data frame before releasing its destination's
+// write lock. Notifications run afterward so observers can safely inject.
+func (s *wsSession) writeFrame(dir capture.Direction, b []byte, msg *capture.Message) error {
+	dst, mu := s.server, &s.smu
+	if dir == capture.ServerToClient {
+		dst, mu = s.client, &s.cmu
 	}
-	return s.client.Flush()
-}
-
-func (s *wsSession) writeToServer(b []byte) error {
-	s.smu.Lock()
-	defer s.smu.Unlock()
-	if _, err := s.server.Write(b); err != nil {
-		return err
+	mu.Lock()
+	n, err := dst.Write(b)
+	if err == nil && n != len(b) {
+		err = io.ErrShortWrite
 	}
-	return s.server.Flush()
+	if err == nil {
+		err = dst.Flush()
+	}
+	if err == nil && msg != nil {
+		s.flow.AddMessage(msg)
+	}
+	mu.Unlock()
+	if err == nil && msg != nil && s.touch != nil {
+		s.touch()
+	}
+	return err
 }
 
 // Inject writes a new frame into the live session. Client→server frames are
 // masked (as a real client's are); server→client frames are not.
 func (s *wsSession) Inject(dir capture.Direction, opcode byte, payload []byte) error {
-	fr := &wsFrame{Fin: true, Opcode: opcode, Payload: payload}
+	// The capture owns its payload after Inject returns.
+	fr := &wsFrame{Fin: true, Opcode: opcode, Payload: bytes.Clone(payload)}
 	if dir == capture.ClientToServer {
 		fr.Masked = true
 		if _, err := rand.Read(fr.MaskKey[:]); err != nil {
 			return err
 		}
-		return s.writeToServer(fr.encode())
 	}
-	return s.writeToClient(fr.encode())
+	msg := wsMessage(dir, opcode, fr.Payload)
+	msg.Meta["injected"] = "true"
+	return s.writeFrame(dir, fr.encode(), msg)
+}
+
+func wsMessage(dir capture.Direction, opcode byte, payload []byte) *capture.Message {
+	return &capture.Message{
+		Direction: dir,
+		Timestamp: time.Now(),
+		Summary:   dir.String() + " ws:" + wsOpcodeName(opcode) + " " + humanBytes(len(payload)),
+		Body:      payload,
+		Raw:       payload,
+		Meta:      map[string]string{"opcode": wsOpcodeName(opcode)},
+	}
 }
 
 // isWebSocketUpgrade reports whether an HTTP request is a WebSocket handshake.
@@ -75,8 +98,8 @@ func headerHasToken(h http.Header, key, token string) bool {
 }
 
 // handleWebSocket relays the upgrade handshake, then pumps frames both ways —
-// capturing every data frame and, for client→server frames, offering them to
-// the tamper hook. Called from HTTP1.Handle when the request is an upgrade.
+// capturing every data frame and offering it to the directional tamper hook.
+// Called from HTTP1.Handle when the request is an upgrade.
 func handleWebSocket(
 	f *capture.Flow,
 	req *http.Request,
@@ -110,7 +133,7 @@ func handleWebSocket(
 		return failHTTP1Response(f, err, touch)
 	}
 
-	session := &wsSession{client: client, server: server}
+	session := &wsSession{client: client, server: server, flow: f, touch: touch}
 	// Register the live session for frame injection if the tamper supports it.
 	if reg, ok := tamper.(capture.SessionRegistrar); ok {
 		reg.RegisterSession(f.ID, session)
@@ -123,7 +146,7 @@ func handleWebSocket(
 		done <- struct{}{}
 	}()
 	go func() {
-		pumpWS(session, server, f, capture.ServerToClient, nil, touch)
+		pumpWS(session, server, f, capture.ServerToClient, tamper, touch)
 		done <- struct{}{}
 	}()
 	<-done
@@ -232,43 +255,41 @@ func parseStatusCode(statusLine string) int {
 	return n
 }
 
-// pumpWS reads frames from src, records data frames on the flow, optionally
-// tampers client→server data frames, and forwards each frame to the opposite
-// peer through the session's guarded writer. Control frames pass through
-// untouched; a close ends the pump.
+// pumpWS reads frames from src and tampers data frames in their own direction.
+// Captured payloads remain original, including dropped or undeliverable frames.
+// Control frames pass through untouched; a close ends the pump.
 func pumpWS(s *wsSession, src *bufio.ReadWriter, f *capture.Flow, dir capture.Direction, tamper Tamperer, touch func()) {
-	writeOut := s.writeToServer // client→server data goes to the server
-	if dir == capture.ServerToClient {
-		writeOut = s.writeToClient
-	}
 	for {
 		fr, err := readWSFrame(src.Reader)
 		if err != nil {
 			return
 		}
+		var msg *capture.Message
 		if isWSData(fr.Opcode) {
-			msg := &capture.Message{
-				Direction: dir,
-				Timestamp: time.Now(),
-				Summary:   dir.String() + " ws:" + wsOpcodeName(fr.Opcode) + " " + humanBytes(len(fr.Payload)),
-				Body:      fr.Payload,
-				Raw:       fr.Payload,
-				Meta:      map[string]string{"opcode": wsOpcodeName(fr.Opcode)},
-			}
-			f.AddMessage(msg)
+			msg = wsMessage(dir, fr.Opcode, fr.Payload)
 			if tamper != nil {
-				out, drop := tamper.BeforeForward(f, msg)
+				hook := tamper.BeforeForward
+				if dir == capture.ServerToClient {
+					hook = tamper.BeforeDeliver
+				}
+				out, drop := hook(f, msg)
 				if drop {
+					f.AddMessage(msg)
 					touch()
-					continue // skip this frame entirely
+					continue
 				}
 				if out != nil {
 					fr.Payload = out
 				}
 			}
-			touch()
 		}
-		if err := writeOut(fr.encode()); err != nil {
+		// Append with the write, not before a pause: an injection can overtake a
+		// paused frame and must also precede it in the same direction's history.
+		if err := s.writeFrame(dir, fr.encode(), msg); err != nil {
+			if msg != nil {
+				f.AddMessage(msg)
+				touch()
+			}
 			return
 		}
 		if fr.Opcode == opClose {

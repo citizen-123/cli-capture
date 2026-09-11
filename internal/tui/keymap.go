@@ -30,6 +30,8 @@ const (
 	ActExportCurl         Action = "export.curl"
 	ActHelpToggle         Action = "help.toggle"
 	ActQuit               Action = "app.quit"
+	ActJobCancel          Action = "job.cancel"
+	ActPauseInspect       Action = "pause.inspect"
 
 	ActFlowNext    Action = "flow.next"
 	ActFlowPrev    Action = "flow.prev"
@@ -49,12 +51,14 @@ const (
 	ActInjectOut   Action = "ws.inject.client"
 	ActInjectIn    Action = "ws.inject.server"
 
-	ActDetailSave  Action = "detail.save"
-	ActDetailClose Action = "detail.close"
+	ActDetailSave   Action = "detail.save"
+	ActDetailClose  Action = "detail.close"
+	ActDetailFormat Action = "detail.toggle-format"
 
-	ActEditorSend   Action = "editor.send"
-	ActEditorFixLen Action = "editor.fix-length"
-	ActEditorCancel Action = "editor.cancel"
+	ActEditorSend        Action = "editor.send"
+	ActEditorFixLen      Action = "editor.fix-length"
+	ActEditorCancel      Action = "editor.cancel"
+	ActEditorReplaceBody Action = "editor.replace-body"
 
 	ActRepeaterCycle Action = "repeater.cycle-focus"
 	ActRepeaterMode  Action = "repeater.cycle-mode"
@@ -85,9 +89,9 @@ var contexts = []string{ctxLeader, ctxTraffic, ctxDetail, ctxEditor, ctxRepeater
 var contextTitle = map[string]string{
 	ctxLeader:   "Global — press the leader, then:",
 	ctxTraffic:  "Traffic pane (right)",
-	ctxDetail:   "Detail view (enter)",
+	ctxDetail:   "Detail view",
 	ctxEditor:   "Editor (while intercepting)",
-	ctxRepeater: "Repeater (R)",
+	ctxRepeater: "Repeater",
 }
 
 // defaults are the stock bindings. The order here is the order the help
@@ -103,6 +107,8 @@ var defaults = map[string][]binding{
 		{ActExportHAR, []string{"h"}, "export session as HAR"},
 		{ActExportFlagged, []string{"f"}, "export flagged flows → flagged.txt"},
 		{ActMouseCapture, []string{"m"}, "toggle mouse capture (off restores native text selection)"},
+		{ActJobCancel, []string{"c"}, "cancel the active resend or attack"},
+		{ActPauseInspect, []string{"p"}, "inspect the held message / return to the previous view"},
 		{ActHelpToggle, []string{"?"}, "toggle this help"},
 		{ActQuit, []string{"q"}, "quit"},
 	},
@@ -131,11 +137,13 @@ var defaults = map[string][]binding{
 	},
 	ctxDetail: {
 		{ActDetailSave, []string{"s"}, "save this flow to a .txt file"},
+		{ActDetailFormat, []string{"v"}, "toggle expanded / raw display"},
 		{ActDetailClose, []string{"esc", "q"}, "back to the list"},
 	},
 	ctxEditor: {
 		{ActEditorSend, []string{"ctrl+s"}, "forward / send the edited bytes"},
 		{ActEditorFixLen, []string{"ctrl+l"}, "fix Content-Length to match the body"},
+		{ActEditorReplaceBody, []string{"ctrl+r"}, "replace a preserved body with text"},
 		{ActEditorCancel, []string{"esc"}, "cancel"},
 		{ActQuit, []string{"ctrl+q"}, "quit"},
 	},
@@ -143,6 +151,7 @@ var defaults = map[string][]binding{
 		{ActRepeaterCycle, []string{"tab"}, "cycle focus: request → payloads → response"},
 		{ActRepeaterMode, []string{"ctrl+o"}, "cycle attack mode: single / sniper / battering-ram / pitchfork / cluster-bomb"},
 		{ActRepeaterSend, []string{"ctrl+s"}, "send (single) or run the attack; results stream into the traffic list"},
+		{ActEditorReplaceBody, []string{"ctrl+r"}, "replace a preserved request body with text"},
 		{ActRepeaterClose, []string{"esc"}, "close"},
 		{ActQuit, []string{"ctrl+q"}, "quit"},
 	},
@@ -193,13 +202,15 @@ func contextActions(ctx string) []string {
 // DefaultLeader is the tmux-style prefix: press it, then a command key. Using a
 // leader means only this one key is taken from the target — everything else in
 // the terminal pane passes through untouched.
-const DefaultLeader = "ctrl+a"
+const DefaultLeader = "ctrl+space"
 
 // KeyMap resolves (context, key) to an action.
 type KeyMap struct {
-	Leader     tea.KeyType
-	LeaderName string
-	binds      map[string]map[string]Action
+	Leader      tea.KeyType
+	LeaderName  string
+	binds       map[string]map[string]Action
+	hints       map[string]map[Action]string
+	globalHints map[Action]string
 }
 
 // controlKeyType resolves the control-key spellings Bubble Tea can report to
@@ -263,12 +274,9 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 			if action != Unbind && !actionInContext(ctx, action) {
 				return KeyMap{}, fmt.Errorf("keys: %s: action %q is not available in this context (have %v)", ctx, action, contextActions(ctx))
 			}
-			// Runtime leader handling precedes traffic lookup, and the
-			// double-leader branch precedes leader-command lookup. Modal
-			// contexts route around onKey and can bind the same control key.
-			// Compare Bubble Tea's KeyType identity so aliases such as
-			// ctrl+space and ctrl+@ cannot silently evade this check.
-			if ctx == ctxLeader || ctx == ctxTraffic {
+			// Global leader routing precedes every context. Runtime identity
+			// catches the Ctrl+Space / Ctrl+@ alias as well.
+			if action != Unbind {
 				if bindingType, ok := controlKeyType(key); ok && bindingType == kt {
 					return KeyMap{}, fmt.Errorf("keys: %s: key %q has the same runtime key as leader %q, so it never reaches this context", ctx, key, leader)
 				}
@@ -283,6 +291,17 @@ func NewKeyMap(leader string, overrides map[string]map[string]string) (KeyMap, e
 			km.binds[ctx][key] = action
 		}
 	}
+	for _, ctx := range contexts {
+		for _, key := range sortedMapKeys(km.binds[ctx]) {
+			if km.binds[ctx][key] == Unbind {
+				continue
+			}
+			if bindingType, ok := controlKeyType(key); ok && bindingType == kt {
+				return KeyMap{}, fmt.Errorf("keys: %s: key %q conflicts with leader %q; unbind or rebind this action", ctx, key, leader)
+			}
+		}
+	}
+	km.buildHints()
 	return km, nil
 }
 
@@ -347,4 +366,23 @@ func (k KeyMap) keysFor(ctx string, a Action) []string {
 	}
 	sort.Strings(extra)
 	return append(out, extra...)
+}
+
+func (km *KeyMap) buildHints() {
+	km.hints = make(map[string]map[Action]string, len(contexts))
+	km.globalHints = make(map[Action]string)
+	for _, ctx := range contexts {
+		km.hints[ctx] = make(map[Action]string, len(defaults[ctx]))
+		for _, b := range defaults[ctx] {
+			keys := km.keysFor(ctx, b.action)
+			if len(keys) == 0 {
+				continue
+			}
+			hint := displayKey(keys[0])
+			km.hints[ctx][b.action] = hint
+			if ctx == ctxLeader {
+				km.globalHints[b.action] = displayKey(km.LeaderName) + " " + hint
+			}
+		}
+	}
 }

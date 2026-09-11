@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // vimHelpHeading opens the part of the overlay for motion prefixes and two-key
@@ -43,7 +44,7 @@ func (m Model) helpBody() string {
 		wrote = true
 		head := contextTitle[ctx]
 		if ctx == ctxLeader {
-			head = "Global — press " + km.LeaderName + " (leader), then:"
+			head = "Global — press " + displayKey(km.LeaderName) + " (leader), then:"
 		}
 		b.WriteString(sectionStyle.Render(head) + "\n")
 		for _, r := range rows {
@@ -75,11 +76,11 @@ func (m Model) helpBody() string {
 	}
 
 	b.WriteString("\n" + sectionStyle.Render("Terminal pane (left)") + "\n")
-	writeHelpRow(&b, "any key", "forwarded to the target app; only "+km.LeaderName+" is caught")
-	writeHelpRow(&b, km.LeaderName, "pressed twice, sends a literal "+km.LeaderName+" to the target")
+	writeHelpRow(&b, "any key", "forwarded to the target app; only "+displayKey(km.LeaderName)+" is caught")
+	writeHelpRow(&b, displayKey(km.LeaderName), "pressed twice in terminal focus, sends its literal byte")
 
-	b.WriteString("\n" + dimStyle.Render("Workflow: arm interception with "+km.LeaderName+" i (scope with -scope); matching") + "\n")
-	b.WriteString(dimStyle.Render("requests PAUSE so you can e-dit, f-orward, or d-rop them.") + "\n")
+	b.WriteString("\n" + dimStyle.Render("Workflow: "+m.leaderHint(ActInterceptRequests)+" arms requests (-scope limits matching).") + "\n")
+	b.WriteString(dimStyle.Render(m.leaderHint(ActPauseInspect)+" inspects a hold without discarding the current draft.") + "\n")
 	return b.String()
 }
 
@@ -175,7 +176,7 @@ func (m Model) helpView() string {
 // the bottom, could never be read. Scrolling is what makes the table that
 // documents itself actually reachable.
 func (m Model) helpViewAt(h, scroll int) string {
-	body := m.helpBody()
+	body := strings.Join(m.helpLines(), "\n")
 	if h <= 0 {
 		return frameHelp(body + "\n" + helpFooter(false, false))
 	}
@@ -190,7 +191,7 @@ func (m Model) helpViewAt(h, scroll int) string {
 	scroll = clampIndex(scroll, len(lines)-avail+1)
 	window := lines[scroll : scroll+avail]
 	return frameHelp(strings.Join(window, "\n") + "\n" +
-		helpFooter(scroll > 0, scroll+avail < len(lines)))
+		truncate(helpFooter(scroll > 0, scroll+avail < len(lines)), max(1, m.width-8)))
 }
 
 // clampHelpScroll bounds helpScroll to the overlay's scrollable range. Both
@@ -198,7 +199,7 @@ func (m Model) helpViewAt(h, scroll int) string {
 // for the wheel — so the two cannot drift into disagreeing about where the
 // bottom is.
 func (m Model) clampHelpScroll() Model {
-	if max := m.maxHelpScroll(m.height); m.helpScroll > max {
+	if max := m.maxHelpScroll(m.height - m.chromeHeight()); m.helpScroll > max {
 		m.helpScroll = max
 	}
 	if m.helpScroll < 0 {
@@ -213,11 +214,19 @@ func (m Model) maxHelpScroll(h int) int {
 	if avail < 1 {
 		avail = 1
 	}
-	n := len(strings.Split(m.helpBody(), "\n")) - avail
+	n := len(m.helpLines()) - avail
 	if n < 0 {
 		n = 0
 	}
 	return n
+}
+
+func (m Model) helpLines() []string {
+	body := m.helpBody()
+	if m.width > 8 {
+		body = ansi.Hardwrap(body, m.width-8, false)
+	}
+	return strings.Split(body, "\n")
 }
 
 func helpFooter(more, below bool) string {

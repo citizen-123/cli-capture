@@ -20,7 +20,7 @@ export.
 │                             ││ ▶ POST /v1/messages         │
 │                             ││ [e]dit  [f]orward  [d]rop   │
 └─────────────────────────────┘└─────────────────────────────┘
- ? for help · Ctrl+A w switch pane · Ctrl+A i arm intercept · Ctrl+A q quit
+ Ctrl+Space ? help · Ctrl+Space w switch pane · Ctrl+Space i intercept
 ```
 
 **📸 See the [visual tour](docs/screenshots.md)** for a screenshot of every feature,
@@ -67,7 +67,7 @@ Use it to:
   substring-search the list.
 - **Replay & export** — resend a flow to its origin; export as curl, HAR 1.2, or
   plain text (single flow or all flagged).
-- **Sessions** — save/load the whole capture to JSON.
+- **Sessions** — save the complete capture to JSON. Loaded flows appear before new traffic arrives.
 - **A real terminal** — the left pane is a full VT100/xterm emulator, so
   full-screen TUI targets render correctly.
 
@@ -192,7 +192,7 @@ entirely and the target is an interactive `$SHELL`.
 | `-mitm <specs>` | *(all)* | MITM (decrypt) only these TLS hosts. |
 | `-no-mitm <specs>` | — | Pass these TLS hosts through **without** decrypting (blind tunnel, still logged). |
 | `-load <file>` | — | Preload a saved capture session (JSON) into the flow list. |
-| `-leader <key>` | `ctrl+a` | Prefix key for cli-capture's own commands. `ctrl+a` … `ctrl+z`, or `ctrl+space`. Move it if your target app needs the default. |
+| `-leader <key>` | `ctrl+space` | Global prefix key. Supports `ctrl+a` through `ctrl+z`, except Tab and Enter. Explicit `ctrl+a` retains the old behavior. |
 | `-transparent <addr>` | off | Also run a transparent-redirect listener at this address (Linux, needs root + nftables/iptables). |
 | `-transparent-uid <uid>` | `-1` | The uid assigned to the launched target and matched by the redirect rule when `-transparent-apply` is used. |
 | `-transparent-apply` | off | Actually install/remove the redirect rules (needs root); otherwise they're just logged for you to run. |
@@ -230,16 +230,17 @@ given twice keeps only the last value — see [docs/scope.md](docs/scope.md).
 
 ## Keybindings
 
-Keys use a **tmux-style leader (`Ctrl+A`)** so the terminal pane keeps all of its
-own keys — only the leader is intercepted (press it twice to send a literal
-`Ctrl+A` to the target). Press **`?`** for the in-app help overlay. The leader
-and every binding below are configurable — see
-[docs/configuration.md](docs/configuration.md).
+The default global leader is **`Ctrl+Space`** (NUL). It works in every view,
+including editors, prompts, Repeater, and help. Ordinary `Ctrl+A` reaches the
+target unchanged.
 
-If your target app wants `Ctrl+A` — readline's beginning-of-line, or tmux itself
-— move the leader instead of fighting it. Set `keys.leader` in your config to any
-`ctrl+a` … `ctrl+z`; the help overlay follows whatever you pick, and the rebound
-key is released back to the target.
+Press **`Ctrl+Space ?`** for help. Press the leader twice to send its literal
+byte from the terminal pane. Escape cancels a pending leader.
+
+If the terminal or multiplexer captures Ctrl+Space, use `-leader ctrl+g`.
+An explicit `-leader ctrl+a` restores the old leader. The flag overrides
+`keys.leader` in the configuration. Help and footer hints use the effective
+bindings. See [configuration](docs/configuration.md).
 
 **Global — leader then:**
 
@@ -248,6 +249,8 @@ key is released back to the target.
 | `w` | switch pane (terminal ⇄ traffic) |
 | `<` / `>` | shrink / grow the terminal pane |
 | `i` / `r` | toggle intercept: requests / responses |
+| `p` | inspect the active held message / return to the previous view |
+| `c` | cancel the active resend or Repeater job |
 | `s` | save session to JSON |
 | `h` | export session as HAR |
 | `f` | export flagged flows → `flagged.txt` |
@@ -270,24 +273,28 @@ own text selection and copy-paste.
 | `o` | cycle sort: none / status / size (surfaces attack outliers) |
 | `/` | filter by host / method / path / status |
 | `enter` | open the detail view |
-| `e` / `f` / `d` | on a **PAUSED** flow: edit / forward / drop |
-| `x` | resend the selected flow to its origin |
+| `e` / `f` / `d` | edit / forward / drop the **active held message**, not the selected row |
+| `x` | start an asynchronous resend to the selected origin |
 | `c` | export the selected flow as a curl command |
 | `n` / `N` | inject a WebSocket frame (client→server / server→client) |
 | `?` | toggle help |
 
-Each row shows the HTTP **status code** (colored by class) and **response size**,
-so you can triage at a glance; attack results also show the payload that produced
-them, and `o` sorts by status or size to surface the outlier.
+Traffic rows retain the protocol, HTTP status code, and response size before
+clipping request text. The selected summary identifies the row. Detail shows the complete target.
 
-**Repeater** (`R`): the response is shown **inline** — `Tab` cycles request →
-payloads → response, `Ctrl+O` cycles attack mode, `Ctrl+S` sends.
+**Repeater** (`R`): `Tab` cycles request, payload, and response focus.
+`Ctrl+O` selects the attack mode. The planned request count appears before
+`Ctrl+S` starts the job. Only one manual job runs at a time. Its progress and
+global cancellation remain available after the Repeater closes.
 
-**Detail view** (`enter`): `j`/`k` scroll · `s` save this flow to `.txt` ·
-`esc`/`q` back.
+**Detail view** (`enter`): `j`/`k` scroll, `v` switches expanded/raw display,
+`s` exports text, and Escape returns. Resizing rewraps the content without losing
+the bottom anchor. Preview limits are explicit. Session JSON retains complete
+stored bytes.
 
-**Editor** (while intercepting): `Ctrl+S` forward/send the edited bytes ·
-`Ctrl+L` fix `Content-Length` · `Esc` cancel.
+**Editor**: `Ctrl+S` sends, `Ctrl+L` repairs HTTP/1 `Content-Length`, and Escape
+leaves the message held. Unchanged sends and header-only edits preserve the
+original body. `Ctrl+R` explicitly replaces a retained body with text.
 
 ---
 
@@ -295,15 +302,18 @@ payloads → response, `Ctrl+O` cycles attack mode, `Ctrl+S` sends.
 
 Interception is **off by default** — cli-capture only records until you arm it:
 
-1. `Ctrl+A w` to focus the traffic pane, `Ctrl+A i` to arm request interception
-   (`Ctrl+A r` for responses). The status bar shows `req:on`.
-2. The next in-scope flow shows `PAUSED`.
-3. `e` opens the editor → change bytes → `Ctrl+S` forwards the edited version
-   (`d` drops it, `f` forwards unchanged).
+1. Press `Ctrl+Space i` to arm requests, or `Ctrl+Space r` to arm responses.
+2. Wait for the held-message row. It identifies direction, flow, and queued count.
+3. Press `Ctrl+Space p` to inspect the held message.
+4. Press `e` to edit, `f` to forward, or `d` to drop that message.
 
-Per protocol: HTTP/1 edits the full request/response; HTTP/2 edits the body
-(unary buffered, gRPC per-message in flight so streams don't stall); WebSocket
-edits per frame and supports live injection (`n`/`N`).
+New pauses do not change keyboard focus or discard drafts. Each decision
+resolves one pause and restores the previous view.
+
+HTTP/1 edits include headers and body. HTTP/2 and gRPC editors change only the
+body. WebSocket interception uses requests for outbound data and responses for
+inbound data. Successful injections (`n`/`N`) appear once with direction and
+injection provenance.
 
 ## Transparent mode (Linux, root)
 
@@ -329,12 +339,12 @@ the same MITM/scope/intercept pipeline.
 
 ## Sessions & export
 
-- **Session** — `Ctrl+A s` writes all flows to `~/.cli-capture/session.json`;
+- **Session** — `Ctrl+Space s` writes all flows to `~/.cli-capture/session.json`;
   `-load <file>` reloads one (flags survive the round-trip).
 - **curl** — `c` writes the selected flow's request as a curl command.
-- **HAR 1.2** — `Ctrl+A h` writes the whole session as `capture.har`.
+- **HAR 1.2** — `Ctrl+Space h` writes the whole session as `capture.har`.
 - **Text** — `s` in the detail view writes the viewed flow to `flow-<id>.txt`;
-  `Ctrl+A f` writes all flagged flows to `flagged.txt`.
+  `Ctrl+Space f` writes all flagged flows to `flagged.txt`.
 
 > Note: exports are verbatim — they include auth headers, cookies, and full
 > request bodies (e.g. an app's system prompt). Treat the files as sensitive.

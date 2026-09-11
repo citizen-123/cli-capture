@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -9,41 +10,38 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/net/http/httpguts"
 
 	"github.com/citizen-123/cli-capture/internal/capture"
 	"github.com/citizen-123/cli-capture/internal/repeater"
 )
 
-// repeaterFocus enumerates the three focusable areas of the Repeater modal.
 const (
 	repFocusReq = iota
 	repFocusPayload
 	repFocusResp
 )
 
-// repeaterState holds the Repeater modal: an editable raw request (with
-// {{markers}}), a payloads editor, the selected attack mode, and the last
-// response (shown inline so you don't have to leave to see the result).
+// The base supplies transport/body reconstruction metadata. The cached preview
+// and attack describe exactly the current draft, not the captured request.
 type repeaterState struct {
-	base    *repeater.Template // origin scheme/host/secure to send against
-	req     textarea.Model     // raw request, editable, may contain {{markers}}
-	payload textarea.Model     // "name = a, b, c" lines
-	respVP  viewport.Model     // last response, scrollable
-	resp    *capture.Flow      // last sent flow
-	mode    repeater.AttackMode
-	focus   int // repFocusReq | repFocusPayload | repFocusResp
-	result  string
+	sessionID  uint64
+	jobID      uint64
+	base       *repeater.Template
+	editBuffer messageEditBuffer
+	req        textarea.Model
+	payload    textarea.Model
+	respVP     viewport.Model
+	resp       *capture.Flow
+	mode       repeater.AttackMode
+	focus      int
+	result     string
+	preview    *repeater.Template
+	attack     repeater.Attack
+	planned    int
+	previewErr error
 }
 
-// --- messages ---
-
-type repeaterResultMsg struct {
-	flow *capture.Flow
-	err  error
-}
-type attackDoneMsg struct{ count int }
-
-// openRepeater loads the selected flow into the Repeater as an editable template.
 func (m *Model) openRepeater() {
 	f := m.selectedFlow()
 	if f == nil {
@@ -54,24 +52,28 @@ func (m *Model) openRepeater() {
 		m.status = "repeater: " + err.Error()
 		return
 	}
+	buffer := newMessageEditBuffer([]byte(tmpl.Raw()), true)
 	req := newEditor()
-	req.SetValue(tmpl.Raw())
+	req.SetValue(buffer.Text())
 	req.Focus()
 	pay := newEditor()
 	pay.SetValue(prefillPayloads(tmpl.Variables()))
 	pay.Blur()
-
-	m.rep = repeaterState{base: tmpl, req: req, payload: pay, respVP: viewport.New(0, 0), mode: repeater.Single, focus: repFocusReq}
-	m.sizeRepeater()
+	m.nextRepeaterID++
+	m.rep = repeaterState{
+		sessionID: m.nextRepeaterID, base: tmpl, editBuffer: buffer,
+		req: req, payload: pay, respVP: viewport.New(0, 0), mode: repeater.Single, focus: repFocusReq,
+	}
+	m.refreshRepeater()
 	m.repeating = true
-	m.status = "Repeater: Tab switch · Ctrl+O mode · Ctrl+S send · Esc close"
+	m.sizeRepeater()
+	m.status = "Repeater"
 }
 
-// onRepeaterKey drives the modal. Ctrl+S runs it, Ctrl+O cycles the attack mode,
-// Tab switches editors, Esc closes; other keys type into the focused editor.
 func (m Model) onRepeaterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.km().Action(ctxRepeater, k.String()) {
 	case ActQuit:
+		m.cancelJob()
 		return m, tea.Quit
 	case ActRepeaterClose:
 		m.repeating = false
@@ -89,85 +91,142 @@ func (m Model) onRepeaterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case ActRepeaterMode:
 		m.rep.mode = nextMode(m.rep.mode)
+		m.refreshRepeater()
+		return m, nil
+	case ActEditorReplaceBody:
+		if m.rep.focus == repFocusReq {
+			text, err := m.rep.editBuffer.ReplaceBody(m.rep.req.Value())
+			if err != nil {
+				m.rep.result = err.Error()
+			} else {
+				m.rep.req.SetValue(text)
+				m.rep.result = "body replacement enabled"
+				m.refreshRepeater()
+			}
+		}
 		return m, nil
 	case ActRepeaterSend:
-		tmpl, err := repeater.ParseRaw(m.rep.req.Value(), m.rep.base)
-		if err != nil {
-			m.rep.result = "parse error: " + err.Error()
-			return m, nil
-		}
-		m.rep.result = "sending…"
-		return m, m.runRepeater(tmpl)
+		cmd := m.runRepeater()
+		return m, cmd
 	}
 
 	var cmd tea.Cmd
 	switch m.rep.focus {
 	case repFocusReq:
+		before := m.rep.req.Value()
 		m.rep.req, cmd = m.rep.req.Update(k)
+		if m.rep.req.Value() != before {
+			m.refreshRepeater()
+		}
 	case repFocusPayload:
+		before := m.rep.payload.Value()
 		m.rep.payload, cmd = m.rep.payload.Update(k)
+		if m.rep.payload.Value() != before {
+			m.refreshRepeater()
+		}
 	case repFocusResp:
 		m.rep.respVP, cmd = m.rep.respVP.Update(k)
 	}
 	return m, cmd
 }
 
-// runRepeater returns a command that sends the request(s). Single mode sends
-// once; attack modes enumerate payload combinations and send each inside the
-// command. Every result is added to the store, so it streams into the traffic
-// list (which doubles as the results table) without blocking the UI goroutine.
-func (m Model) runRepeater(tmpl *repeater.Template) tea.Cmd {
-	payloads := repeater.ParsePayloads(m.rep.payload.Value())
-	store := m.store
-
-	if m.rep.mode == repeater.Single {
-		vars := map[string]string{}
-		for name, list := range payloads {
-			if len(list) > 0 {
-				vars[name] = list[0]
-			}
+func (m *Model) refreshRepeater() {
+	m.rep.preview = nil
+	m.rep.planned = 0
+	raw, err := m.rep.editBuffer.Bytes(m.rep.req.Value())
+	if err != nil {
+		m.rep.previewErr = err
+		return
+	}
+	tmpl, err := repeater.ParseRaw(string(raw), m.rep.base)
+	if err != nil {
+		m.rep.previewErr = err
+		return
+	}
+	attack := planRepeaterAttack(tmpl, m.rep.mode, repeater.ParsePayloads(m.rep.payload.Value()))
+	count, err := attack.Count()
+	if err == nil {
+		req, renderErr := tmpl.Render(attack.Base)
+		err = renderErr
+		if err == nil && (req.URL.Host == "" || (req.URL.Scheme != "http" && req.URL.Scheme != "https")) {
+			err = fmt.Errorf("request needs an HTTP or HTTPS target")
 		}
-		return func() tea.Msg {
-			flow, err := repeater.Send(tmpl, vars)
-			if flow != nil {
-				store.Add(flow)
+		if err == nil {
+			for name, values := range req.Header {
+				if !httpguts.ValidHeaderFieldName(name) {
+					err = fmt.Errorf("invalid request header name %q", name)
+					break
+				}
+				for _, value := range values {
+					if !httpguts.ValidHeaderFieldValue(value) {
+						err = fmt.Errorf("invalid value for request header %q", name)
+						break
+					}
+				}
+				if err != nil {
+					break
+				}
 			}
-			return repeaterResultMsg{flow: flow, err: err}
 		}
 	}
+	m.rep.preview, m.rep.attack, m.rep.planned, m.rep.previewErr = tmpl, attack, count, err
+}
 
-	// Attack: only variables that have a payload list are insertion points; the
-	// rest keep their (first) value as a baseline.
-	var positions []string
-	var lists [][]string
-	base := map[string]string{}
-	for _, v := range tmpl.Variables() {
-		list := payloads[v]
+// Payload selection is shared by the preview and the worker. Single mode uses
+// the first supplied value, while attack insertion points exclude empty lists.
+func planRepeaterAttack(tmpl *repeater.Template, mode repeater.AttackMode, payloads map[string][]string) repeater.Attack {
+	attack := repeater.Attack{Mode: mode, Base: make(map[string]string)}
+	if mode == repeater.Single {
+		for name, list := range payloads {
+			if len(list) > 0 {
+				attack.Base[name] = list[0]
+			}
+		}
+		for _, name := range tmpl.Variables() {
+			if len(payloads[name]) > 0 {
+				attack.Positions = append(attack.Positions, name)
+			}
+		}
+		return attack
+	}
+	for _, name := range tmpl.Variables() {
+		list := payloads[name]
 		if len(list) == 0 || (len(list) == 1 && list[0] == "") {
 			continue
 		}
-		positions = append(positions, v)
-		lists = append(lists, list)
-		base[v] = list[0]
+		attack.Positions = append(attack.Positions, name)
+		attack.Lists = append(attack.Lists, list)
+		attack.Base[name] = list[0]
 	}
-	attack := repeater.Attack{Mode: m.rep.mode, Positions: positions, Lists: lists, Base: base}
-	return func() tea.Msg {
-		n := 0
-		for job := range attack.Jobs() {
-			if flow, _ := repeater.Send(tmpl, job); flow != nil {
-				if flow.Request != nil {
-					flow.Request.Meta["payload"] = jobLabel(job, positions)
-				}
-				store.Add(flow)
-				n++
-			}
-		}
-		return attackDoneMsg{count: n}
-	}
+	return attack
 }
 
-// jobLabel renders the fuzzed positions of an attack job as "name=value, …" so
-// the traffic-list row for each result shows which payload produced it.
+func (m *Model) runRepeater() tea.Cmd {
+	if m.job.active() {
+		m.status = "manual job already active"
+		return nil
+	}
+	if m.rep.previewErr != nil {
+		m.rep.result = "cannot send: " + m.rep.previewErr.Error()
+		return nil
+	}
+	if m.rep.preview == nil {
+		m.rep.result = "cannot send: no request template"
+		return nil
+	}
+	// refreshRepeater builds fresh owned templates/maps; later edits replace
+	// these values instead of mutating anything held by the worker.
+	tmpl := m.rep.preview
+	kind := m.rep.mode.String()
+	if m.rep.mode == repeater.Single {
+		kind = "repeater"
+	}
+	return m.startRequestJob(kind, m.rep.sessionID, m.rep.attack, m.rep.planned,
+		func(ctx context.Context, vars map[string]string) (*capture.Flow, error) {
+			return repeater.Send(ctx, tmpl, vars)
+		})
+}
+
 func jobLabel(job map[string]string, positions []string) string {
 	parts := make([]string, 0, len(positions))
 	for _, p := range positions {
@@ -177,24 +236,15 @@ func jobLabel(job map[string]string, positions []string) string {
 }
 
 func (m *Model) sizeRepeater() {
-	w := m.width - 4
-	if w < 10 {
-		w = 10
+	if m.rep.base == nil {
+		return
 	}
-	// Fixed chrome: title + 3 section labels + footer ≈ 5 lines.
-	avail := m.height - 6
-	if avail < 9 {
-		avail = 9
-	}
-	reqH := avail * 45 / 100
-	payH := avail * 20 / 100
-	if payH < 2 {
-		payH = 2
-	}
-	respH := avail - reqH - payH
-	if respH < 3 {
-		respH = 3
-	}
+	w := max(1, m.width)
+	// Title, three labels, bounded result, and footer are six single rows.
+	avail := max(3, m.height-m.chromeHeight()-6)
+	reqH := max(1, avail*45/100)
+	payH := max(1, avail*20/100)
+	respH := max(1, avail-reqH-payH)
 	m.rep.req.SetWidth(w)
 	m.rep.req.SetHeight(reqH)
 	m.rep.payload.SetWidth(w)
@@ -202,42 +252,103 @@ func (m *Model) sizeRepeater() {
 	m.rep.respVP.Width = w
 	m.rep.respVP.Height = respH
 	if m.rep.resp != nil {
+		offset, atBottom := m.rep.respVP.YOffset, m.rep.respVP.AtBottom()
 		m.rep.respVP.SetContent(renderRepeaterResponse(m.rep.resp, w))
+		if atBottom {
+			m.rep.respVP.GotoBottom()
+		} else {
+			m.rep.respVP.SetYOffset(offset)
+		}
 	}
 }
 
 func (m Model) repeaterView() string {
-	title := "Repeater " + glyphArrow + " " + m.rep.base.Method + " " + m.rep.base.URL
-	reqLabel := sectionStyle.Render("Request") + focusMark(m.rep.focus == repFocusReq)
-	payLabel := sectionStyle.Render("Payloads") +
-		dimStyle.Render("  ["+m.rep.mode.String()+"]  name = a, b, c") + focusMark(m.rep.focus == repFocusPayload)
-	respLabel := sectionStyle.Render("Response") + focusMark(m.rep.focus == repFocusResp)
-
-	footer := dimStyle.Render("Tab switch · Ctrl+O mode · Ctrl+S send · Esc close")
-	if m.rep.result != "" {
-		footer = pendingStyle.Render(m.rep.result) + "   " + footer
+	w := max(1, m.width)
+	height := max(0, m.height-m.chromeHeight())
+	if height < 9 || w < 30 {
+		return fitRepeaterRows("Repeater: enlarge terminal to edit", w, height) + "\n" + m.globalChrome()
 	}
-
-	return lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render(truncate(title, m.width-1)),
-		reqLabel,
+	title := "Repeater"
+	if m.rep.preview != nil {
+		title += " " + glyphArrow + " " + m.rep.preview.Method + " " + m.rep.preview.URL
+	} else {
+		title += " — invalid request"
+	}
+	requestLabel := "Request"
+	if notice := m.rep.editBuffer.Notice(); notice != "" {
+		requestLabel += " · " + notice
+		if key := m.keyHint(ctxRepeater, ActEditorReplaceBody); key != "" {
+			requestLabel += " · " + key + " replace body"
+		}
+	}
+	planned := fmt.Sprintf("%d planned", m.rep.planned)
+	if m.rep.previewErr != nil {
+		planned = "send disabled"
+	}
+	payloadLabel := "Payloads [" + m.rep.mode.String() + "] · " + planned
+	result := m.rep.result
+	if m.rep.previewErr != nil {
+		result = "preview: " + m.rep.previewErr.Error()
+	}
+	var hints []string
+	for _, hint := range []struct {
+		action Action
+		label  string
+	}{
+		{ActRepeaterSend, "send"}, {ActRepeaterClose, "close"},
+		{ActRepeaterCycle, "focus"}, {ActRepeaterMode, "mode"},
+	} {
+		if key := m.keyHint(ctxRepeater, hint.action); key != "" {
+			hints = append(hints, key+" "+hint.label)
+		}
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		titleStyle.Render(repeaterLine(title, w)),
+		repeaterLine(sectionStyle.Render(requestLabel)+focusMark(m.rep.focus == repFocusReq), w),
 		m.rep.req.View(),
-		payLabel,
+		repeaterLine(sectionStyle.Render(payloadLabel)+focusMark(m.rep.focus == repFocusPayload), w),
 		m.rep.payload.View(),
-		respLabel,
+		repeaterLine(sectionStyle.Render("Response")+focusMark(m.rep.focus == repFocusResp), w),
 		m.rep.respVP.View(),
-		footer,
+		pendingStyle.Render(repeaterLine(result, w)),
+		dimStyle.Render(repeaterLine(strings.Join(hints, " · "), w)),
 	)
+	return fitRepeaterRows(body, w, height) + "\n" + m.globalChrome()
 }
 
-// renderRepeaterResponse renders the last response (status, headers, decoded &
-// colored body) for the inline response pane.
-func renderRepeaterResponse(f *capture.Flow, width int) string {
-	if f == nil || f.Response == nil {
-		return dimStyle.Render("(no response yet — Ctrl+S to send)")
+func repeaterLine(text string, width int) string {
+	return ansi.Truncate(strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(text), max(1, width), "…")
+}
+
+func fitRepeaterRows(text string, width, height int) string {
+	if height <= 0 {
+		return ""
 	}
-	body := codeStyle(f).Render(f.Response.Summary) + "\n\n" + renderMessage(f.Response, width, true)
-	return ansi.Hardwrap(body, width, false)
+	lines := strings.Split(text, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], max(1, width), "…")
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderRepeaterResponse(f *capture.Flow, width int) string {
+	if f == nil {
+		return ""
+	}
+	if f.Err != nil {
+		return ansi.Hardwrap("error: "+f.Err.Error(), max(1, width), false)
+	}
+	if f.Response == nil {
+		return dimStyle.Render("(no response)")
+	}
+	body := codeStyle(f).Render(f.Response.Summary) + "\n\n" + renderMessage(f.Response, max(1, width), true)
+	return ansi.Hardwrap(body, max(1, width), false)
 }
 
 func focusMark(active bool) string {
